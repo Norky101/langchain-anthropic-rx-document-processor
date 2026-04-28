@@ -98,6 +98,14 @@ uv run streamlit run app.py
 
 The UI presents per-document panels with three views: the original raw text (demo only), the scrubbed text passed to the LLM with redaction tokens highlighted, and the canonical `PurchaseOrder` output with confidence-routing badge. The full audit log renders as a sortable table at the bottom.
 
+Each accepted record exposes downloadable artifacts:
+
+- **Canonical JSON** — what the marketplace order-management API ingests
+- **Buyer confirmation PDF** — single-page acknowledgement receipt for the buyer
+- A `What happens next` expander listing the downstream consumers that would receive the canonical record in production (marketplace API, supplier ERP, EDI 855, review queue, compliance archive)
+
+The audit log table has a CSV export for offline compliance review. See `src/exporters.py` and DEMO.md §5 for details.
+
 The UI is rate-limited via `st.session_state` to a configurable number of ingestions per browser session (`DEMO_INGEST_QUOTA`, default `5`) to bound API spend on public deployments.
 
 ### Deployment to Streamlit Community Cloud
@@ -149,6 +157,7 @@ graphiteRxDemo/
 │   ├── scrubber.py         # regex sensitive-data redaction
 │   ├── llm.py              # LangChain structured-output chain
 │   ├── storage.py          # SQLite ops + audit log
+│   ├── exporters.py        # canonical JSON, confirmation PDF, audit CSV
 │   └── pipeline.py         # orchestration
 ├── ingest.py               # CLI entrypoint
 └── app.py                  # Streamlit UI

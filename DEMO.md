@@ -283,7 +283,35 @@ A production deployment would augment the LLM-derived score with:
 
 ---
 
-## 5. The audit log
+## 5. Outputs and downstream consumers
+
+The pipeline normalizes inbound documents into a canonical `PurchaseOrder`. That record is the input to several downstream consumers; ingestion is not the terminal step. The demo ships three of those output artifacts as downloadable files so the input → output story is observable end-to-end:
+
+| Artifact | Where in UI | Purpose | Format |
+|---|---|---|---|
+| **Canonical JSON** | per-result `Download canonical JSON` button | What the marketplace order-management API ingests. Single PurchaseOrder with embedded LineItem entries. | `application/json` |
+| **Buyer confirmation PDF** | per-result `Download confirmation PDF` button | What an ops team emails back to the buyer to acknowledge receipt. Brand-aligned single-page receipt with header summary, line-items table, and routing-status footer. | `application/pdf` |
+| **Audit log CSV** | `Export audit log → CSV` under the audit table | Tabular flatten of `audit_log` for offline compliance review. Opens cleanly in Excel; dict-typed columns are rendered as compact strings. | `text/csv` |
+
+Generation is local (no additional API calls); see `src/exporters.py`.
+
+### Production wiring (not enabled in the demo)
+
+In a production deployment, the same canonical record fans out across additional consumers automatically on accept:
+
+| Downstream | Trigger | Format |
+|---|---|---|
+| Marketplace order-management API | Confidence ≥ routing threshold (default 0.70) | REST POST · canonical JSON |
+| Supplier ERP (NetSuite / SAP / Oracle) | On accept | ERP-specific adapter (Mulesoft / Workato / direct) |
+| Buyer confirmation email | On accept | PDF (above), attached |
+| EDI 855 acknowledgement | If the buyer is EDI-enabled | X12 855 over AS2 / SFTP / VAN |
+| Review queue UI | Confidence below threshold OR `flagged_fields` non-empty | Same record; reviewer verifies and re-routes |
+| Compliance archive | Always | Audit row → tamper-evident append-only store |
+| Slack notification | On accept | Order summary message to the supplier rep |
+
+The demo's per-result `What happens next` expander surfaces this routing decision tree inline so reviewers can see, for any individual order, where it would go next.
+
+## 6. The audit log
 
 Every ingestion attempt — accepted or rejected — appends one row to `audit_log`. Schema:
 
@@ -312,7 +340,7 @@ The audit log supports 340B-relevant procurement compliance reviews by recording
 
 ---
 
-## 6. Sample reference
+## 7. Sample reference
 
 | File | Format | Description |
 |---|---|---|
@@ -325,7 +353,7 @@ The audit log supports 340B-relevant procurement compliance reviews by recording
 
 ---
 
-## 7. Out of scope (and the production answer)
+## 8. Out of scope (and the production answer)
 
 | Skipped | Production answer |
 |---|---|
@@ -341,7 +369,7 @@ The audit log supports 340B-relevant procurement compliance reviews by recording
 
 ---
 
-## 8. Adjacent applications
+## 9. Adjacent applications
 
 The same six-stage pipeline applies to other supplier-side intake problems by changing the output Pydantic model and the system prompt. No code changes elsewhere.
 

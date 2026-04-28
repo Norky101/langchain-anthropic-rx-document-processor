@@ -14,13 +14,14 @@ import json
 import os
 import re
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
-from src import storage
+from src import exporters, storage
 from src.pipeline import process_file
 
 
@@ -189,6 +190,30 @@ with st.sidebar:
 4. **Extract structure** (Claude · LangChain `with_structured_output`)
 5. **Validate** against `PurchaseOrder` schema (Pydantic v2)
 6. **Persist** to SQLite + audit log
+"""
+    )
+
+    st.subheader("What the scrubber catches")
+    st.markdown(
+        """
+Deterministic regex patterns. Every match is replaced with a typed
+placeholder before the LLM sees the text.
+
+| Type | Pattern matched | Placeholder |
+|---|---|---|
+| **DEA** | 2 letters + 7 digits (e.g. `AB1234567`) | `[REDACTED_DEA]` |
+| **Account** | "acct/account/customer" + ID | `[REDACTED_ACCOUNT]` |
+| **Routing** | "routing/aba" + 9-digit | `[REDACTED_ROUTING]` |
+| **SSN** | `###-##-####` | `[REDACTED_SSN]` |
+| **Phone** | US phone formats | `[REDACTED_PHONE]` |
+| **Email** | `name@host.tld` | `[REDACTED_EMAIL]` |
+| **PHI** | "patient/pt/for" + capitalized name | `[REDACTED_PHI]` |
+
+**On PHI specifically** — HIPAA defines 18 PHI identifiers (names,
+addresses, dates, MRN, etc.). This demo catches **patient names in
+context** as a representative case. A production deployment uses
+**AWS Comprehend Medical** or **Microsoft Presidio** for full HIPAA
+PHI detection across all 18 identifier classes.
 """
     )
 
@@ -364,6 +389,62 @@ def _render_unit(result, *, header: str, idx: int) -> None:
                 unsafe_allow_html=True,
             )
             st.json(order.model_dump(mode="json"), expanded=False)
+
+            # ── Outbound artifacts ──
+            stem_for_filename = (
+                order.buyer_org_name
+                or order.po_reference
+                or Path(order.source_file).stem
+            )
+            d_json, d_pdf, _ = st.columns([1, 1, 2])
+            with d_json:
+                st.download_button(
+                    label="Download canonical JSON",
+                    data=exporters.order_to_json_bytes(order),
+                    file_name=exporters.safe_filename(stem_for_filename, "json"),
+                    mime="application/json",
+                    key=f"json-{idx}",
+                    help="Machine-consumable canonical PurchaseOrder. "
+                    "Shape matches the marketplace order-management API.",
+                    use_container_width=True,
+                )
+            with d_pdf:
+                st.download_button(
+                    label="Download confirmation PDF",
+                    data=exporters.order_to_confirmation_pdf(order),
+                    file_name=exporters.safe_filename(
+                        f"{stem_for_filename}-confirmation", "pdf"
+                    ),
+                    mime="application/pdf",
+                    key=f"pdf-{idx}",
+                    help="Buyer-facing acknowledgement. What an ops team would "
+                    "email back to confirm receipt.",
+                    use_container_width=True,
+                )
+
+            with st.expander("What happens next (production wiring — illustrative)"):
+                conf_route = (
+                    "**marketplace order-management API** (auto-route, ≥0.70 confidence)"
+                    if order.confidence >= 0.7
+                    else "**review queue UI** (held for human verification before routing)"
+                )
+                st.markdown(
+                    f"""
+This canonical record would flow to:
+
+| Downstream | Trigger | Format |
+|---|---|---|
+| {conf_route} | On accept | REST POST · canonical JSON |
+| **Supplier ERP** (NetSuite / SAP / Oracle) | On accept | ERP-specific adapter |
+| **Buyer confirmation email** | On accept | The PDF above, attached |
+| **EDI 855 acknowledgement** | If buyer is EDI-enabled | X12 855 over AS2 / SFTP |
+| **Compliance archive** | Always | Audit row → tamper-evident store |
+| **Slack to supplier rep** | On accept | Order summary message |
+
+The downloads above (JSON + PDF) are the same artifacts the integrations
+would emit; they are wired here for demo and reviewer inspection.
+"""
+                )
         else:
             st.error("Rejected by validation / extractor")
             st.code(result.error or "no error captured")
@@ -372,6 +453,20 @@ def _render_unit(result, *, header: str, idx: int) -> None:
 # ─── Per-unit results ────────────────────────────────────────────────────────
 st.divider()
 st.subheader("Extraction results")
+st.markdown(
+    """
+One panel per **extraction unit**. PDFs and CSVs produce a single unit
+per file. SMS logs produce one unit per non-empty line, since each
+message is a separate buyer order. For each unit:
+
+* **Left — Source** · two tabs. *Scrubbed* shows what the LLM actually
+  received, with redaction tokens highlighted in teal. *Raw input*
+  shows the unredacted text (demo only — production never exposes raw).
+* **Right — Output** · the canonical `PurchaseOrder` the LLM produced,
+  with a routing badge derived from confidence and any `flagged_fields`
+  the model wants a human to verify.
+"""
+)
 
 for i, r in enumerate(results):
     label = (
@@ -387,9 +482,21 @@ for i, r in enumerate(results):
 # ─── Audit log (always visible) ──────────────────────────────────────────────
 st.divider()
 st.subheader("Audit log · append-only · 340B-relevant")
-st.caption(
-    "Every ingestion attempt — accepted or rejected — appends one row. "
-    "Rows persist in `store.db → audit_log` and survive across sessions."
+st.markdown(
+    """
+**Why this exists.** Procurement compliance reviewers need to answer
+questions like *"show every ingestion in the last 7 days where model
+confidence was below 0.8"* or *"show every PHI redaction event last
+quarter"* without rummaging through inboxes. The audit log is the
+authoritative record that makes those queries one SQL statement.
+
+**What's recorded.** One row per ingestion attempt — accepted **or**
+rejected. Each row captures the source artifact, the redaction
+signature (which sensitive types matched and how many of each), the
+LLM's self-reported confidence, the field paths the model flagged for
+review, and the accept/reject decision. Append-only; rows persist in
+`store.db → audit_log` across sessions.
+"""
 )
 
 storage.init_db()
@@ -434,13 +541,77 @@ else:
         use_container_width=True,
         hide_index=True,
         column_config={
+            "row": st.column_config.NumberColumn(
+                "row",
+                help="Audit row ID. Append-only; never reused.",
+            ),
+            "timestamp": st.column_config.TextColumn(
+                "timestamp",
+                help="Server-side ingestion time (UTC).",
+            ),
+            "file": st.column_config.TextColumn(
+                "file",
+                help="Source filename as ingested.",
+            ),
+            "fmt": st.column_config.TextColumn(
+                "fmt",
+                help="Detected format: pdf, csv, or sms.",
+            ),
+            "status": st.column_config.TextColumn(
+                "status",
+                help=(
+                    "'accepted' = LLM produced a Pydantic-valid PurchaseOrder; "
+                    "'rejected' = extractor or validator failed. Both still "
+                    "leave an audit row."
+                ),
+            ),
             "confidence": st.column_config.NumberColumn(
                 "confidence",
                 format="%.2f",
-                help="LLM-self-reported confidence (0–1).",
+                help=(
+                    "LLM-self-reported confidence (0–1). Drives routing: "
+                    "≥0.70 auto-route, 0.50–0.69 low-priority review, "
+                    "<0.50 high-priority review."
+                ),
+            ),
+            "redactions": st.column_config.TextColumn(
+                "redactions",
+                help=(
+                    "Per-type counts of sensitive identifiers replaced by "
+                    "the scrubber before the LLM saw the text. Format: "
+                    "TYPE:count separated by '·'."
+                ),
+            ),
+            "flagged": st.column_config.TextColumn(
+                "flagged",
+                help=(
+                    "JSON-path field names the model said it was unsure "
+                    "about. Used by reviewers to scope verification."
+                ),
+            ),
+            "order": st.column_config.NumberColumn(
+                "order",
+                help=(
+                    "Foreign key into the orders table. NULL when the "
+                    "ingestion was rejected and no order was written."
+                ),
             ),
         },
     )
+
+    csv_col, _ = st.columns([1, 3])
+    with csv_col:
+        st.download_button(
+            label=f"Export audit log → CSV ({len(audit_rows)} rows)",
+            data=exporters.audit_log_to_csv_bytes(audit_rows),
+            file_name=f"audit_log_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.csv",
+            mime="text/csv",
+            help=(
+                "All audit rows flattened to CSV for offline compliance "
+                "review. Opens cleanly in Excel."
+            ),
+            use_container_width=True,
+        )
 
     with st.expander("Raw audit JSON"):
         st.code(json.dumps(audit_rows, indent=2), language="json")
