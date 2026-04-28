@@ -29,12 +29,81 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("Order & Document Intake Pipeline")
+# Brand palette sampled from graphiterx.com
+NAVY = "#18193F"
+TEAL = "#00A8B3"
+TINT = "#D2E5E5"
+SLATE = "#2F2E41"
+
+st.markdown(
+    f"""
+    <style>
+        /* Brand banner */
+        .brand-banner {{
+            background: linear-gradient(135deg, {NAVY} 0%, {SLATE} 100%);
+            color: #FFFFFF;
+            padding: 1.5rem 2rem;
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+            border-left: 6px solid {TEAL};
+        }}
+        .brand-banner h1 {{
+            color: #FFFFFF;
+            margin: 0 0 0.25rem 0;
+            font-size: 1.75rem;
+            font-weight: 600;
+        }}
+        .brand-banner p {{
+            color: {TINT};
+            margin: 0;
+            font-size: 0.95rem;
+        }}
+        .brand-pill {{
+            display: inline-block;
+            background: {TEAL};
+            color: #FFFFFF;
+            font-size: 0.7rem;
+            font-weight: 600;
+            padding: 0.15rem 0.6rem;
+            border-radius: 999px;
+            margin-right: 0.5rem;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }}
+        /* Section dividers tinted with brand */
+        hr {{
+            border-top: 1px solid {TINT} !important;
+        }}
+        /* Sidebar headers */
+        section[data-testid="stSidebar"] h3 {{
+            color: {NAVY};
+            border-bottom: 2px solid {TEAL};
+            padding-bottom: 0.25rem;
+        }}
+        /* Code blocks subtle */
+        code {{
+            color: {NAVY};
+            background: {TINT}40;
+        }}
+    </style>
+
+    <div class="brand-banner">
+      <h1>
+        <span class="brand-pill">graphiteRx</span>
+        Order &amp; Document Intake Pipeline
+      </h1>
+      <p>PDF · CSV · SMS in &nbsp;→&nbsp; canonical PurchaseOrder out &nbsp;·&nbsp;
+         DEA / account / PHI scrubbed &nbsp;·&nbsp; 340B-grade audit log</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.caption(
     "Drop a PDF, CSV, or SMS log. The pipeline detects the format, scrubs "
-    "DEA/account/PHI, asks Claude to populate a canonical PurchaseOrder via "
-    "LangChain, validates it with Pydantic, and writes both the order and a "
-    "340B-grade audit row to SQLite."
+    "sensitive data, asks Claude (via LangChain `with_structured_output`) to "
+    "populate a canonical PurchaseOrder, validates it with Pydantic, and "
+    "writes both the order and a per-ingestion audit row to SQLite."
 )
 
 if not os.environ.get("ANTHROPIC_API_KEY"):

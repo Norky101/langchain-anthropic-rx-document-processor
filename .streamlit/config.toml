@@ -1,0 +1,11 @@
+# GraphiteRx brand palette (sampled from graphiterx.com)
+#   navy   #18193F  primary dark, body text
+#   teal   #00A8B3  accent, CTAs, primary
+#   tint   #D2E5E5  soft teal background, callouts
+#   slate  #2F2E41  subheadings
+[theme]
+primaryColor = "#00A8B3"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F2F7F7"
+textColor = "#18193F"
+font = "sans serif"
