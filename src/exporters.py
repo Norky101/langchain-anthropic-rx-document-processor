@@ -266,7 +266,6 @@ def audit_log_to_csv_bytes(rows: list[dict]) -> bytes:
             "order_id",
             "redaction_signature",
             "flagged_fields",
-            "reason",
         ]
     )
     for row in rows:
@@ -284,7 +283,6 @@ def audit_log_to_csv_bytes(rows: list[dict]) -> bytes:
                 row.get("order_id"),
                 sig,
                 ", ".join(flagged),
-                row.get("reason") or "",
             ]
         )
     return buf.getvalue().encode("utf-8")
