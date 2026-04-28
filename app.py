@@ -37,6 +37,11 @@ from src.pipeline import process_file
 
 load_dotenv()
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
 logger = logging.getLogger("graphiterx.ui")
 
 st.set_page_config(

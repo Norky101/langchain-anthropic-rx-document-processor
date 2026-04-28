@@ -5,13 +5,21 @@ One model call per source artifact. The model is initialized through
 OpenAI → Ollama) is a config change, not a code change. Today we default to
 Anthropic for the demo; production deployments inside a HIPAA BAA AWS account
 would set `LLM_PROVIDER=bedrock_converse`.
+
+Reliability:
+    * `LLM_TIMEOUT_S` (default 30) bounds each call.
+    * Retries up to `LLM_MAX_ATTEMPTS` (default 3) with exponential backoff
+      on transient Anthropic errors (rate-limit, timeout, 5xx).
 """
 
 from __future__ import annotations
 
+import logging
 import os
+import uuid
 from datetime import datetime, timezone
 
+import anthropic
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -19,6 +27,16 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from .schema import PurchaseOrder
 
 load_dotenv()
+
+logger = logging.getLogger("graphiterx.llm")
+
+
+_TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
+    anthropic.RateLimitError,
+    anthropic.APITimeoutError,
+    anthropic.APIConnectionError,
+    anthropic.InternalServerError,
+)
 
 
 _SYSTEM_PROMPT = """\
@@ -62,10 +80,26 @@ def _model():
     Default is Haiku 4.5 — fastest and cheapest production-grade Claude. Plenty
     capable for schema-aligned extraction on the document sizes this pipeline
     handles. Override with LLM_MODEL for a heavier model on harder corpora.
+
+    Wraps the chat model with a bounded retry on transient Anthropic errors:
+    rate limits, request timeouts, connection errors, and 5xx. Retries use
+    exponential backoff with jitter and stop after `LLM_MAX_ATTEMPTS`.
     """
     provider = os.environ.get("LLM_PROVIDER", "anthropic")
     model_id = os.environ.get("LLM_MODEL", "claude-haiku-4-5-20251001")
-    chat = init_chat_model(model_id, model_provider=provider)
+    timeout_s = float(os.environ.get("LLM_TIMEOUT_S", "30"))
+    max_attempts = int(os.environ.get("LLM_MAX_ATTEMPTS", "3"))
+
+    chat = init_chat_model(
+        model_id,
+        model_provider=provider,
+        timeout=timeout_s,
+    )
+    chat = chat.with_retry(
+        retry_if_exception_type=_TRANSIENT_ERRORS,
+        stop_after_attempt=max_attempts,
+        wait_exponential_jitter=True,
+    )
     return chat.with_structured_output(PurchaseOrder)
 
 
@@ -78,8 +112,18 @@ def extract_order(
     """Run the LLM extractor over already-scrubbed source text.
 
     Returns a validated PurchaseOrder. Raises pydantic.ValidationError if the
-    model returns something that doesn't conform to the schema.
+    model returns something that doesn't conform to the schema. Transient
+    Anthropic errors (rate-limit, timeout, 5xx) are retried automatically;
+    after exhaustion the original exception bubbles to the caller.
     """
+    request_id = uuid.uuid4().hex[:8]
+    logger.info(
+        "extract start request_id=%s format=%s file=%s text_len=%d",
+        request_id,
+        source_format,
+        source_file,
+        len(redacted_text),
+    )
     model = _model()
     messages = [
         SystemMessage(content=_SYSTEM_PROMPT),
@@ -92,10 +136,21 @@ def extract_order(
             )
         ),
     ]
-    result = model.invoke(messages)
+    try:
+        result = model.invoke(messages)
+    except Exception:
+        logger.exception("extract failed request_id=%s", request_id)
+        raise
     # Ensure source bookkeeping is correct regardless of what the model wrote.
     result.source_format = source_format  # type: ignore[assignment]
     result.source_file = source_file
     if not result.received_at:
         result.received_at = datetime.now(timezone.utc)
+    logger.info(
+        "extract done  request_id=%s confidence=%.2f line_items=%d flagged=%d",
+        request_id,
+        result.confidence,
+        len(result.line_items),
+        len(result.flagged_fields),
+    )
     return result

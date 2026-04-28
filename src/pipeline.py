@@ -8,6 +8,8 @@ N=1 for PDF and CSV and N=lines for SMS).
 
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +19,8 @@ from . import extractors, llm, storage
 from .detector import Format, detect_format
 from .schema import PurchaseOrder
 from .scrubber import ScrubResult, scrub
+
+logger = logging.getLogger("graphiterx.pipeline")
 
 
 _EXTRACTORS = {
@@ -58,12 +62,17 @@ def process_file(
     """
     fmt: Format = detect_format(path)
     units: list[str] = _EXTRACTORS[fmt](path)
+    logger.info(
+        "pipeline start file=%s format=%s units=%d",
+        path.name, fmt, len(units),
+    )
 
     storage.init_db(db_path)
     results: list[IngestResult] = []
 
     with storage.connect(db_path) as conn:
         for idx, raw_text in enumerate(units):
+            t_start = time.perf_counter()
             scrubbed: ScrubResult = scrub(raw_text)
 
             error: str | None = None
@@ -92,6 +101,16 @@ def process_file(
                 flagged_fields=order.flagged_fields if order else [],
                 status="accepted" if order is not None else "rejected",
                 reason=error,
+            )
+
+            elapsed_ms = (time.perf_counter() - t_start) * 1000
+            logger.info(
+                "pipeline unit  file=%s idx=%d status=%s elapsed_ms=%d redactions=%s",
+                path.name,
+                idx,
+                "accepted" if order is not None else "rejected",
+                int(elapsed_ms),
+                scrubbed.redaction_counts or {},
             )
 
             results.append(
