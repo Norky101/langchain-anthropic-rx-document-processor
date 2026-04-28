@@ -1,5 +1,7 @@
 # graphiteRxDemo
 
+[![CI](https://github.com/Norky101/graphiteRxDemo/actions/workflows/ci.yml/badge.svg)](https://github.com/Norky101/graphiteRxDemo/actions/workflows/ci.yml)
+
 A LangChain-powered ingestion pipeline that normalizes heterogeneous buyer-side documents (faxed PDF purchase orders, emailed CSV reorder lists, SMS reorder messages) into a single canonical `PurchaseOrder` record, with deterministic redaction of sensitive identifiers and an append-only audit trail.
 
 📖 **[`DEMO.md`](DEMO.md)** — full walkthrough: architecture, real input/output examples, confidence-scoring mechanism, production extensions.
@@ -108,16 +110,57 @@ The audit log table has a CSV export for offline compliance review. See `src/exp
 
 The UI is rate-limited via `st.session_state` to a configurable number of ingestions per browser session (`DEMO_INGEST_QUOTA`, default `5`) to bound API spend on public deployments.
 
+### Configuration reference
+
+All configuration is via environment variables. Local: `.env` (gitignored). Streamlit Cloud: *Manage app → Secrets*.
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `ANTHROPIC_API_KEY` | yes | — | Anthropic API key. The CLI and Streamlit both use it. |
+| `DEMO_INGEST_QUOTA` | no | `5` | Per-browser-session ingestion cap. Bounds API spend on public URLs. |
+| `DEMO_MAX_FILE_MB` | no | `5` | Per-upload size cap. Files above this are rejected before any processing. |
+| `DEMO_SHOW_RAW` | no | unset | Set to `1` to expose the *Raw input (before scrubber)* tab. Off by default. Public deploys never expose unredacted user input. |
+| `DEMO_AUTO_THRESHOLD` | no | `0.70` | Confidence floor for auto-routing to the marketplace. Below = review queue. |
+| `DEMO_LOW_THRESHOLD` | no | `0.50` | Boundary between low- and high-priority review. |
+| `LLM_PROVIDER` | no | `anthropic` | LangChain provider id. Set to `bedrock_converse` to switch to AWS Bedrock. |
+| `LLM_MODEL` | no | `claude-haiku-4-5-20251001` | Model identifier passed to `init_chat_model`. |
+| `LLM_TIMEOUT_S` | no | `30` | Per-LLM-call timeout in seconds. |
+| `LLM_MAX_ATTEMPTS` | no | `3` | Retry attempts on transient Anthropic errors (rate-limit, timeout, 5xx). |
+
 ### Deployment to Streamlit Community Cloud
 
 1. Push the repository to GitHub.
-2. At [share.streamlit.io](https://share.streamlit.io), create a new app pointing at `app.py`.
-3. Under *Manage app → Secrets*, add:
-   ```
+2. At [share.streamlit.io](https://share.streamlit.io), create a new app pointing at `app.py` on the `main` branch.
+3. Under *Manage app → Secrets*, paste at minimum:
+   ```toml
    ANTHROPIC_API_KEY = "sk-ant-..."
    DEMO_INGEST_QUOTA = "5"
+   DEMO_MAX_FILE_MB = "5"
+   # Leave DEMO_SHOW_RAW unset to keep the raw-input tab hidden on the public URL.
    ```
-4. Set a monthly spend cap on the Anthropic API key at [console.anthropic.com → Billing](https://console.anthropic.com/settings/billing) to bound worst-case cost.
+4. Set a monthly spend cap on the Anthropic API key at [console.anthropic.com → Billing](https://console.anthropic.com/settings/billing) — second line of defense against runaway cost.
+
+## Testing
+
+```bash
+uv run pytest                        # 86 tests, ~0.5 s on a laptop
+uv run pytest --cov                  # with coverage report (fail_under=90)
+uv run pytest tests/test_scrubber.py # one module
+uv run pytest -k pdf                 # filter by name
+```
+
+`tests/` covers every deterministic module in `src/` to 100% line coverage. The Anthropic API call in `src/llm.py` is omitted from coverage and is exercised manually against the bundled samples (the `samples/` folder contains real-LLM verification inputs).
+
+CI runs the same tests on every push and pull request to `main` via `.github/workflows/ci.yml`.
+
+## Security notes
+
+- **API keys are never committed.** `.env` is gitignored. `.env.example` ships only a placeholder.
+- **Sensitive identifiers are redacted before the LLM stage.** The model never sees raw DEA, account, SSN, phone, email, or PHI patterns. See `src/scrubber.py` for the regex set; production deployments should swap this for AWS Comprehend Medical or Microsoft Presidio for full HIPAA PHI detection.
+- **The raw-input UI tab is hidden by default.** Set `DEMO_SHOW_RAW=1` only for local development or deployments inside a trust boundary.
+- **File uploads are validated** for extension, size cap, and (for PDFs) magic-byte signature before the pipeline runs.
+- **Per-session ingestion quota** caps API spend; pair with the Anthropic monthly spend cap.
+- **The audit log is the authoritative record.** SQLite for the demo; production should land it in a tamper-evident append-only store (DynamoDB, Postgres with logical replication to S3 with object lock).
 
 ## Production deployment
 
@@ -147,18 +190,26 @@ A pharma deployment would replace SQLite with RDS (Postgres or Aurora) inside a 
 
 ```
 graphiteRxDemo/
-├── DEMO.md                 # full walkthrough document
-├── samples/                # PDF, CSV, SMS sample inputs
-├── scripts/make_pdf.py     # regenerates the sample PDF
+├── DEMO.md                            # full walkthrough document
+├── README.md                          # this file
+├── pyproject.toml                     # uv project + pytest + coverage config
+├── .github/workflows/ci.yml           # GitHub Actions CI
+├── .streamlit/config.toml             # Streamlit theme (brand palette)
+├── samples/                           # PDF / CSV / SMS sample inputs
+├── scripts/
+│   ├── make_pdf.py                    # regenerates the sample PDF
+│   └── make_slides.py                 # generates slides/graphiterx_demo.pptx
+├── slides/graphiterx_demo.pptx        # generated 5-slide deck
 ├── src/
-│   ├── schema.py           # PurchaseOrder + LineItem Pydantic models
-│   ├── detector.py         # format routing
-│   ├── extractors.py       # pdf / csv / sms extractors
-│   ├── scrubber.py         # regex sensitive-data redaction
-│   ├── llm.py              # LangChain structured-output chain
-│   ├── storage.py          # SQLite ops + audit log
-│   ├── exporters.py        # canonical JSON, confirmation PDF, audit CSV
-│   └── pipeline.py         # orchestration
-├── ingest.py               # CLI entrypoint
-└── app.py                  # Streamlit UI
+│   ├── schema.py                      # PurchaseOrder + LineItem Pydantic models
+│   ├── detector.py                    # format routing
+│   ├── extractors.py                  # pdf / csv / sms extractors
+│   ├── scrubber.py                    # regex sensitive-data redaction
+│   ├── llm.py                         # LangChain structured-output chain
+│   ├── storage.py                     # SQLite ops + audit log
+│   ├── exporters.py                   # canonical JSON · confirmation PDF · audit CSV
+│   └── pipeline.py                    # orchestration
+├── tests/                             # pytest suite (86 tests, 100% on src/ ex llm)
+├── ingest.py                          # CLI entrypoint
+└── app.py                             # Streamlit UI
 ```
