@@ -65,15 +65,18 @@ with st.sidebar:
         "it (detect, extract, scrub) plus one after (validate). New buyer "
         "channels join automatically — bytes through the same pipeline."
     )
-    st.subheader("Production swap")
+    st.subheader("Production swap (not yet enabled)")
     st.code(
         'init_chat_model(\n  "anthropic.claude-sonnet-4-6",\n'
         '  model_provider="bedrock_converse",\n)',
         language="python",
     )
     st.caption(
-        "Same code, AWS Bedrock inside a HIPAA BAA AWS account. Bedrock also "
-        "exposes Llama / Cohere / Titan via the same call signature."
+        "Demo is on Anthropic direct (Haiku 4.5). Switching to Bedrock for a "
+        "HIPAA BAA AWS deployment is one line of code plus ~20 min of infra: "
+        "`uv add langchain-aws`, configure AWS creds, request Bedrock model "
+        "access. The same `bedrock_converse` provider also exposes Llama / "
+        "Cohere / Titan via the unified Converse API."
     )
 
 
