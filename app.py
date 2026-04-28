@@ -3,17 +3,27 @@
 Run locally:
     uv run streamlit run app.py
 
-Deployment notes:
-    - Set ANTHROPIC_API_KEY as a secret on Streamlit Community Cloud.
-    - Set DEMO_INGEST_QUOTA to cap LLM calls per browser session (default 5).
+Configuration via environment (Streamlit Cloud → Manage app → Secrets):
+    ANTHROPIC_API_KEY        required, the LLM provider key
+    DEMO_INGEST_QUOTA        per-session LLM-call cap (default 5)
+    DEMO_SHOW_RAW            set to "1" to expose the raw-input tab.
+                             Default: hidden — public deploys never expose
+                             unredacted user input even in the UI
+    DEMO_MAX_FILE_MB         per-upload file-size cap in MB (default 5)
+    DEMO_AUTO_THRESHOLD      confidence at/above which a record auto-routes
+                             (default 0.70); below LOW_THRESHOLD goes to
+                             high-priority review
+    DEMO_LOW_THRESHOLD       low-priority-review boundary (default 0.50)
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,6 +36,8 @@ from src.pipeline import process_file
 
 
 load_dotenv()
+
+logger = logging.getLogger("graphiterx.ui")
 
 st.set_page_config(
     page_title="graphiteRx — Order Intake Pipeline",
@@ -40,8 +52,35 @@ TINT = "#D2E5E5"
 SLATE = "#2F2E41"
 AMBER = "#E6B592"
 
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 # Per-session ingestion cap so a public deploy cannot exhaust the API budget.
-DEFAULT_QUOTA = int(os.environ.get("DEMO_INGEST_QUOTA", "5"))
+DEFAULT_QUOTA = _env_int("DEMO_INGEST_QUOTA", 5)
+MAX_FILE_BYTES = _env_int("DEMO_MAX_FILE_MB", 5) * 1024 * 1024
+AUTO_THRESHOLD = _env_float("DEMO_AUTO_THRESHOLD", 0.70)
+LOW_THRESHOLD = _env_float("DEMO_LOW_THRESHOLD", 0.50)
+SHOW_RAW = os.environ.get("DEMO_SHOW_RAW", "").lower() in {"1", "true", "yes"}
+
+ALLOWED_EXTENSIONS = {".pdf", ".csv", ".txt"}
+ALLOWED_MAGIC_PREFIXES = {
+    ".pdf": (b"%PDF-",),
+    ".csv": None,        # text-based; no reliable magic
+    ".txt": None,
+}
+
 
 if "ingest_count" not in st.session_state:
     st.session_state.ingest_count = 0
@@ -49,6 +88,32 @@ if "ingest_count" not in st.session_state:
 
 def _quota_remaining() -> int:
     return max(0, DEFAULT_QUOTA - st.session_state.ingest_count)
+
+
+def _validate_upload(uploaded) -> str | None:
+    """Reject obviously malformed uploads. Returns an error message if invalid,
+    or None if the file is acceptable."""
+    suffix = Path(uploaded.name).suffix.lower()
+    if suffix not in ALLOWED_EXTENSIONS:
+        return f"Unsupported file extension {suffix!r}. Allowed: .pdf, .csv, .txt"
+    if uploaded.size > MAX_FILE_BYTES:
+        max_mb = MAX_FILE_BYTES // (1024 * 1024)
+        return (
+            f"File is {uploaded.size / 1024 / 1024:.1f} MB; demo cap is {max_mb} MB. "
+            f"Use a smaller sample for the demo."
+        )
+    if uploaded.size == 0:
+        return "Uploaded file is empty."
+    magic = ALLOWED_MAGIC_PREFIXES.get(suffix)
+    if magic:
+        # Peek the first bytes; for PDFs the file must start with %PDF-
+        head = uploaded.getvalue()[: max(len(m) for m in magic)]
+        if not any(head.startswith(m) for m in magic):
+            return (
+                f"File extension is {suffix!r} but contents do not match. "
+                f"Refusing to process — possible disguised binary."
+            )
+    return None
 
 
 st.markdown(
@@ -223,12 +288,14 @@ PHI detection across all 18 identifier classes.
 The model populates `confidence` (0–1) and `flagged_fields` as part of
 the same call that produces the data. Routing is threshold-based:
 
-* <span class="conf-badge conf-green">≥ 0.70</span> auto-route to marketplace
-* <span class="conf-badge conf-amber">0.50 – 0.69</span> review queue, low priority
-* <span class="conf-badge conf-red">&lt; 0.50</span> review queue, high priority
+* <span class="conf-badge conf-green">≥ {AUTO_THRESHOLD:.2f}</span> auto-route to marketplace
+* <span class="conf-badge conf-amber">{LOW_THRESHOLD:.2f} – {AUTO_THRESHOLD:.2f}</span> review queue, low priority
+* <span class="conf-badge conf-red">&lt; {LOW_THRESHOLD:.2f}</span> review queue, high priority
 
 `flagged_fields` lists the specific paths a reviewer should verify.
-See [DEMO.md §4](https://github.com/Norky101/graphiteRxDemo/blob/main/DEMO.md#4-confidence-scoring)
+Thresholds are configurable via `DEMO_AUTO_THRESHOLD` and
+`DEMO_LOW_THRESHOLD` env vars. See
+[DEMO.md §4](https://github.com/Norky101/graphiteRxDemo/blob/main/DEMO.md#4-confidence-scoring)
 for the full mechanism and production extensions.
 """,
         unsafe_allow_html=True,
@@ -253,8 +320,9 @@ uploaded = st.file_uploader(
     type=["pdf", "csv", "txt"],
     accept_multiple_files=False,
     help=(
-        "Bundled samples live in `samples/`. Each session is capped at "
-        f"{DEFAULT_QUOTA} ingestions to protect the demo API budget."
+        f"Bundled samples live in `samples/`. Per-session cap: "
+        f"{DEFAULT_QUOTA} ingestions · max upload size: "
+        f"{MAX_FILE_BYTES // 1024 // 1024} MB."
     ),
 )
 
@@ -264,6 +332,12 @@ if not uploaded:
         "`reorder_list.csv`, `sms_orders.txt`. Each exercises a different "
         "path through the pipeline."
     )
+    st.stop()
+
+# Input validation: extension, size, magic-bytes for PDF
+validation_error = _validate_upload(uploaded)
+if validation_error:
+    st.error(f"**Upload rejected.** {validation_error}")
     st.stop()
 
 if _quota_remaining() == 0:
@@ -286,10 +360,36 @@ def _store_raw_for_uploaded(uploaded_file):
     return final_path
 
 
+request_id = uuid.uuid4().hex[:8]
+logger.info(
+    "ingest start  request_id=%s file=%s size=%d quota_remaining=%d",
+    request_id,
+    uploaded.name,
+    uploaded.size,
+    _quota_remaining(),
+)
+
 with st.spinner(f"Running pipeline on {uploaded.name}…"):
-    final_path = _store_raw_for_uploaded(uploaded)
-    results = process_file(final_path)
-    st.session_state.ingest_count += 1
+    try:
+        final_path = _store_raw_for_uploaded(uploaded)
+        results = process_file(final_path)
+        st.session_state.ingest_count += 1
+    except Exception as exc:  # noqa: BLE001 — last-line error UX guard
+        logger.exception("ingest crash request_id=%s", request_id)
+        st.error(
+            "**Pipeline error.** The system encountered an unexpected error "
+            f"processing this file. Error reference: `{request_id}`."
+        )
+        with st.expander("Technical detail"):
+            st.code(f"{type(exc).__name__}: {exc}")
+        st.stop()
+
+logger.info(
+    "ingest done   request_id=%s units=%d accepted=%d",
+    request_id,
+    len(results),
+    sum(1 for r in results if r.accepted),
+)
 
 
 accepted = sum(1 for r in results if r.accepted)
@@ -324,9 +424,9 @@ def st_escape(s: str) -> str:
 
 
 def _confidence_badge_html(conf: float) -> str:
-    if conf >= 0.7:
+    if conf >= AUTO_THRESHOLD:
         cls, label = "conf-green", "AUTO-ROUTE"
-    elif conf >= 0.5:
+    elif conf >= LOW_THRESHOLD:
         cls, label = "conf-amber", "LOW-PRIORITY REVIEW"
     else:
         cls, label = "conf-red", "HIGH-PRIORITY REVIEW"
@@ -342,12 +442,17 @@ def _render_unit(result, *, header: str, idx: int) -> None:
 
     # ── Source: raw vs scrubbed ──
     with src_col:
-        tab_scrub, tab_raw = st.tabs(
-            [
-                f"Scrubbed (sent to LLM) · {sum(result.redaction_counts.values()) or 0} redactions",
-                "Raw input (before scrubber)",
-            ]
-        )
+        # Raw tab is gated by DEMO_SHOW_RAW. Default off — public deploys never
+        # expose unredacted user input even in the UI.
+        n_redactions = sum(result.redaction_counts.values()) or 0
+        scrubbed_label = f"Scrubbed (sent to LLM) · {n_redactions} redactions"
+        if SHOW_RAW:
+            tab_scrub, tab_raw = st.tabs(
+                [scrubbed_label, "Raw input (before scrubber)"]
+            )
+        else:
+            (tab_scrub,) = st.tabs([scrubbed_label])
+
         with tab_scrub:
             st.markdown(
                 f'<div class="scrub-pre">{_highlight_redactions(result.redacted_text)}</div>',
@@ -364,15 +469,17 @@ def _render_unit(result, *, header: str, idx: int) -> None:
                 )
             else:
                 st.caption("no patterns matched")
-        with tab_raw:
-            st.caption(
-                "**Demo only.** The raw text below contains the unredacted "
-                "values. In production the raw text never leaves the scrubber stage."
-            )
-            st.markdown(
-                f'<div class="raw-pre">{st_escape(result.raw_text)}</div>',
-                unsafe_allow_html=True,
-            )
+        if SHOW_RAW:
+            with tab_raw:
+                st.caption(
+                    "**Local-only view.** The raw text contains unredacted "
+                    "values. This tab is hidden by default on public "
+                    "deployments (`DEMO_SHOW_RAW` env var)."
+                )
+                st.markdown(
+                    f'<div class="raw-pre">{st_escape(result.raw_text)}</div>',
+                    unsafe_allow_html=True,
+                )
 
     # ── Output: canonical record + status ──
     with out_col:
