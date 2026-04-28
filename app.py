@@ -103,57 +103,87 @@ display_path = Path(uploaded.name)
 
 
 with st.spinner(f"Running pipeline on {uploaded.name}…"):
-    # process_file uses the path's suffix for detection and the basename for display.
-    # Rename the temp file so the audit log shows the user-visible name.
+    # Rename so the audit log shows the user-visible filename, not the tempfile.
     final_path = tmp_path.with_name(uploaded.name)
     tmp_path.rename(final_path)
-    result = process_file(final_path)
+    results = process_file(final_path)
 
 
-col_source, col_canonical, col_audit = st.columns([1.1, 1.4, 1])
+accepted = sum(1 for r in results if r.accepted)
+rejected = len(results) - accepted
+n_units = len(results)
+fmt = results[0].source_format if results else "?"
 
-with col_source:
-    st.subheader("Scrubbed source")
-    st.caption(f"Format: `{result.source_format}` · file: `{result.source_file}`")
-    st.text_area(
-        label="redacted text",
-        value=result.redacted_text,
-        height=520,
-        label_visibility="collapsed",
-    )
-    st.caption(f"Redaction counts: {result.redaction_counts or '—'}")
+st.markdown(
+    f"**{n_units}** extraction unit{'s' if n_units != 1 else ''} · "
+    f"`{accepted}` accepted, `{rejected}` rejected · "
+    f"format `{fmt}`"
+)
 
-with col_canonical:
-    st.subheader("Canonical PurchaseOrder")
-    if result.accepted and result.order:
-        st.success(f"Accepted · confidence {result.order.confidence:.2f}")
-        if result.order.flagged_fields:
-            st.warning(f"Flagged fields: {result.order.flagged_fields}")
-        st.json(result.order.model_dump(mode="json"))
-    else:
-        st.error("Rejected by validation / extractor")
-        st.code(result.error or "no error captured")
 
-with col_audit:
-    st.subheader("Audit log")
-    storage.init_db()
-    with storage.connect() as conn:
-        rows = storage.fetch_audit(conn)
-    if not rows:
-        st.caption("(no rows yet)")
-    else:
-        # Display the most recent (this run) row prominently, full log below.
-        latest = rows[0]
-        st.markdown(
-            f"""
-**Latest entry**
-
-* `{latest['status']}` · `{latest['source_format']}` · `{latest['source_file']}`
-* timestamp: `{latest['timestamp']}`
-* confidence: `{latest['llm_confidence']}`
-* redactions: `{latest['redaction_count_by_type']}`
-* flagged: `{latest['flagged_fields']}`
-"""
+def _render_one(result, *, header: str) -> None:
+    st.markdown(f"### {header}")
+    col_source, col_canonical, col_audit = st.columns([1.1, 1.4, 1])
+    with col_source:
+        st.caption(f"redactions: `{result.redaction_counts or '—'}`")
+        st.text_area(
+            label="scrubbed text",
+            value=result.redacted_text,
+            height=260,
+            label_visibility="collapsed",
+            key=f"text-{header}",
         )
-        with st.expander("Full audit log"):
-            st.code(json.dumps(rows, indent=2), language="json")
+    with col_canonical:
+        if result.accepted and result.order:
+            badge = (
+                "🟢" if result.order.confidence >= 0.7 else "🟡"
+                if result.order.confidence >= 0.5 else "🔴"
+            )
+            st.markdown(
+                f"{badge} **confidence {result.order.confidence:.2f}**"
+                + (
+                    f"&nbsp;&nbsp;flagged: `{result.order.flagged_fields}`"
+                    if result.order.flagged_fields
+                    else ""
+                )
+            )
+            st.json(result.order.model_dump(mode="json"), expanded=False)
+        else:
+            st.error("Rejected by validation / extractor")
+            st.code(result.error or "no error captured")
+    with col_audit:
+        st.caption("audit row appended:")
+        audit_summary = {
+            "status": "accepted" if result.accepted else "rejected",
+            "source_file": result.source_file,
+            "source_format": result.source_format,
+            "redaction_count_by_type": result.redaction_counts,
+            "llm_confidence": (
+                round(result.order.confidence, 3) if result.order else None
+            ),
+            "flagged_fields": (
+                result.order.flagged_fields if result.order else []
+            ),
+        }
+        st.json(audit_summary, expanded=False)
+
+
+# For multi-unit results (SMS), render each one. For single-unit (PDF/CSV)
+# the header is just the filename.
+for r in results:
+    label = (
+        f"`{r.source_file}` — message {r.unit_index + 1} of {n_units}"
+        if r.source_format == "sms" and n_units > 1
+        else f"`{r.source_file}`"
+    )
+    _render_one(r, header=label)
+    st.divider()
+
+
+# Full audit log at the bottom — pulls every row from SQLite, not just this run.
+storage.init_db()
+with storage.connect() as conn:
+    audit_rows = storage.fetch_audit(conn)
+
+with st.expander(f"Full audit log ({len(audit_rows)} rows)"):
+    st.code(json.dumps(audit_rows, indent=2), language="json")

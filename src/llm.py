@@ -48,17 +48,23 @@ Your job is to populate a PurchaseOrder. A few rules:
 6. Set confidence honestly. If the buyer didn't specify a quantity or drug
    strength, mark those fields in flagged_fields and lower confidence
    accordingly. A confidence below 0.5 will route the record to human review.
-7. Each input may contain multiple distinct orders. If so, extract one
-   PurchaseOrder per logical order; the wrapper will call you once per order.
-   For this call, focus on the single order described in the user message.
+7. Each call extracts exactly one PurchaseOrder. The pipeline pre-splits SMS
+   logs so each invocation receives a single message; PDFs and CSVs that
+   describe one order are passed whole. Treat the entire user message as the
+   one order to extract — never try to emit multiple orders or skip an order.
 """
 
 
 def _model():
     """Build the structured-output chain. Cheap to call; no module-level state
-    so tests can override LLM_PROVIDER between runs."""
+    so tests can override LLM_PROVIDER between runs.
+
+    Default is Haiku 4.5 — fastest and cheapest production-grade Claude. Plenty
+    capable for schema-aligned extraction on the document sizes this pipeline
+    handles. Override with LLM_MODEL for a heavier model on harder corpora.
+    """
     provider = os.environ.get("LLM_PROVIDER", "anthropic")
-    model_id = os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
+    model_id = os.environ.get("LLM_MODEL", "claude-haiku-4-5-20251001")
     chat = init_chat_model(model_id, model_provider=provider)
     return chat.with_structured_output(PurchaseOrder)
 

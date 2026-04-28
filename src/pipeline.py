@@ -2,7 +2,8 @@
 
 This is the file that proves the architecture. Every input format takes the
 same path through the same five stages; the only stage that does anything
-input-specific is the extractor.
+input-specific is the extractor (and even that just produces N strings, where
+N=1 for PDF and CSV and N=lines for SMS).
 """
 
 from __future__ import annotations
@@ -27,11 +28,12 @@ _EXTRACTORS = {
 
 @dataclass
 class IngestResult:
-    """Captured for both successful and rejected ingestions so the audit log
-    can be written either way."""
+    """One extraction unit's result. A single SMS log produces multiple of
+    these (one per message); a PDF or CSV produces exactly one."""
 
     source_file: str
     source_format: Format
+    unit_index: int                     # 0 for PDF/CSV; 0..N-1 for SMS lines
     redaction_counts: dict[str, int]
     raw_text: str
     redacted_text: str
@@ -43,51 +45,66 @@ class IngestResult:
         return self.order is not None and self.error is None
 
 
-def process_file(path: Path, *, db_path: Path = storage.DEFAULT_DB_PATH) -> IngestResult:
-    """Run one file end-to-end and persist results.
+def process_file(
+    path: Path,
+    *,
+    db_path: Path = storage.DEFAULT_DB_PATH,
+) -> list[IngestResult]:
+    """Run one file end-to-end. Returns one IngestResult per extraction unit.
 
-    Returns an IngestResult either way; check `.accepted` to distinguish.
+    For PDF/CSV that's a single-element list; for SMS one entry per message.
+    Each unit gets its own audit-log row so the trail is granular even when a
+    single source file produces many orders.
     """
     fmt: Format = detect_format(path)
-    raw_text = _EXTRACTORS[fmt](path)
-    scrubbed: ScrubResult = scrub(raw_text)
-
-    error: str | None = None
-    order: PurchaseOrder | None = None
-    try:
-        order = llm.extract_order(
-            source_format=fmt,
-            source_file=path.name,
-            redacted_text=scrubbed.text,
-        )
-    except ValidationError as exc:
-        error = f"validation: {exc.errors(include_url=False)}"
-    except Exception as exc:  # noqa: BLE001 - audit log captures any failure mode
-        error = f"{type(exc).__name__}: {exc}"
+    units: list[str] = _EXTRACTORS[fmt](path)
 
     storage.init_db(db_path)
-    with storage.connect(db_path) as conn:
-        order_id: int | None = None
-        if order is not None:
-            order_id = storage.insert_order(conn, order)
-        storage.append_audit(
-            conn,
-            source_file=path.name,
-            source_format=fmt,
-            redaction_counts=scrubbed.redaction_counts,
-            order_id=order_id,
-            confidence=order.confidence if order else None,
-            flagged_fields=order.flagged_fields if order else [],
-            status="accepted" if order is not None else "rejected",
-            reason=error,
-        )
+    results: list[IngestResult] = []
 
-    return IngestResult(
-        source_file=path.name,
-        source_format=fmt,
-        redaction_counts=scrubbed.redaction_counts,
-        raw_text=raw_text,
-        redacted_text=scrubbed.text,
-        order=order,
-        error=error,
-    )
+    with storage.connect(db_path) as conn:
+        for idx, raw_text in enumerate(units):
+            scrubbed: ScrubResult = scrub(raw_text)
+
+            error: str | None = None
+            order: PurchaseOrder | None = None
+            try:
+                order = llm.extract_order(
+                    source_format=fmt,
+                    source_file=path.name,
+                    redacted_text=scrubbed.text,
+                )
+            except ValidationError as exc:
+                error = f"validation: {exc.errors(include_url=False)}"
+            except Exception as exc:  # noqa: BLE001 - audit log captures any failure mode
+                error = f"{type(exc).__name__}: {exc}"
+
+            order_id: int | None = None
+            if order is not None:
+                order_id = storage.insert_order(conn, order)
+            storage.append_audit(
+                conn,
+                source_file=path.name,
+                source_format=fmt,
+                redaction_counts=scrubbed.redaction_counts,
+                order_id=order_id,
+                confidence=order.confidence if order else None,
+                flagged_fields=order.flagged_fields if order else [],
+                status="accepted" if order is not None else "rejected",
+                reason=error,
+            )
+
+            results.append(
+                IngestResult(
+                    source_file=path.name,
+                    source_format=fmt,
+                    unit_index=idx,
+                    redaction_counts=scrubbed.redaction_counts,
+                    raw_text=raw_text,
+                    redacted_text=scrubbed.text,
+                    order=order,
+                    error=error,
+                )
+            )
+
+    return results

@@ -19,8 +19,9 @@ from src.pipeline import process_file
 
 
 def _print_result(path: Path, result) -> None:
+    suffix = f"  [{result.unit_index}]" if result.source_format == "sms" else ""
     if result.accepted:
-        print(f"\n=== {path.name}  ({result.source_format})  ✓ ACCEPTED ===")
+        print(f"\n=== {path.name}{suffix}  ({result.source_format})  ✓ ACCEPTED ===")
         print(f"redactions: {result.redaction_counts}")
         order = result.order
         print(f"confidence: {order.confidence:.2f}")
@@ -28,7 +29,7 @@ def _print_result(path: Path, result) -> None:
             print(f"flagged: {order.flagged_fields}")
         print(json.dumps(order.model_dump(mode="json"), indent=2))
     else:
-        print(f"\n=== {path.name}  ({result.source_format})  ✗ REJECTED ===")
+        print(f"\n=== {path.name}{suffix}  ({result.source_format})  ✗ REJECTED ===")
         print(f"error: {result.error}")
         print(f"redactions: {result.redaction_counts}")
 
@@ -70,12 +71,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"skip: {path} not found", file=sys.stderr)
             rejected += 1
             continue
-        result = process_file(path)
-        _print_result(path, result)
-        if result.accepted:
-            accepted += 1
-        else:
-            rejected += 1
+        for result in process_file(path):
+            _print_result(path, result)
+            if result.accepted:
+                accepted += 1
+            else:
+                rejected += 1
 
     print(f"\nsummary: {accepted} accepted, {rejected} rejected")
     return 0 if rejected == 0 else 1
