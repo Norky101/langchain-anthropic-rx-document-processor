@@ -13,3 +13,8 @@ dependencies = [
     "reportlab>=4.0",
     "streamlit>=1.30",
 ]
+
+[dependency-groups]
+dev = [
+    "python-pptx>=1.0.2",
+]
