@@ -95,12 +95,15 @@ def _model():
         model_provider=provider,
         timeout=timeout_s,
     )
-    chat = chat.with_retry(
+    # Structured output BEFORE retry — `.with_retry` returns a RunnableRetry
+    # that doesn't expose `.with_structured_output`. Wrapping in this order
+    # gives a retry policy over the full extract+parse runnable.
+    structured = chat.with_structured_output(PurchaseOrder)
+    return structured.with_retry(
         retry_if_exception_type=_TRANSIENT_ERRORS,
         stop_after_attempt=max_attempts,
         wait_exponential_jitter=True,
     )
-    return chat.with_structured_output(PurchaseOrder)
 
 
 def extract_order(

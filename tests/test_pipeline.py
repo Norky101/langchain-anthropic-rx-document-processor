@@ -6,14 +6,33 @@ they run on CI with no API key.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from src import pipeline, storage
+from src import llm, pipeline, storage
 from src.schema import LineItem, PurchaseOrder
+
+
+# ─── Construction tests ──────────────────────────────────────────────────────
+class TestModelConstruction:
+    """Ensure llm._model() returns something invokable. Caught a regression
+    where with_retry was applied before with_structured_output, returning a
+    RunnableRetry that no longer exposed with_structured_output."""
+
+    def test_model_is_invokable(self, monkeypatch) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-used")
+        m = llm._model()
+        assert hasattr(m, "invoke")
+
+    def test_model_has_retry_wrapper(self, monkeypatch) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-used")
+        m = llm._model()
+        # The outermost wrapper is a RunnableRetry so transient errors retry
+        assert type(m).__name__ == "RunnableRetry"
 
 
 def _stub_extract(*, source_format, source_file, redacted_text):
