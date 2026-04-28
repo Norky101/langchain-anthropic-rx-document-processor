@@ -59,6 +59,21 @@ with st.sidebar:
 6. **Persist** to SQLite + audit log
 """
     )
+    st.subheader("Confidence scoring")
+    st.markdown(
+        """
+The LLM **self-reports** confidence (0–1) and lists `flagged_fields`
+it's unsure about. UI badges:
+
+* 🟢 ≥ 0.70 — auto-route to marketplace
+* 🟡 0.50–0.69 — review recommended
+* 🔴 < 0.50 — **human review required**
+
+Confidence is a soft signal, not a calibrated probability. See
+[`DEMO.md`](https://github.com/Norky101/graphiteRxDemo/blob/main/DEMO.md#4-how-confidence-scoring-works)
+for the full mechanism and what production-grade scoring would add.
+"""
+    )
     st.subheader("Why an LLM here")
     st.caption(
         "The LLM is the universal adapter. Three deterministic stages around "

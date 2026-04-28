@@ -2,6 +2,8 @@
 
 > **Universal order & document intake for healthcare commerce.** Drop a PDF, CSV, or SMS message in. A canonical `PurchaseOrder` comes out — DEA numbers and PHI scrubbed, every ingestion logged for 340B-grade audit. Built with LangChain + Claude.
 
+> 📖 **Walkthrough doc:** [`DEMO.md`](DEMO.md) — self-contained read with architecture, real input/output examples, and a full explanation of how confidence scoring works.
+
 ---
 
 ## What this is
