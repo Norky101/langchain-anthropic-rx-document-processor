@@ -16,5 +16,29 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pytest>=9.0.3",
+    "pytest-cov>=7.1.0",
     "python-pptx>=1.0.2",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers --strict-config"
+filterwarnings = [
+    # SQLite cleanup noise from python's gc — tests do close their connections,
+    # but pytest's own AST recompile triggers a stale handle scan.
+    "ignore::ResourceWarning",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    # Excluded: actual LLM call is mocked in tests; real-LLM integration is
+    # exercised manually against bundled samples.
+    "src/llm.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+fail_under = 90
