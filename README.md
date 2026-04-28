@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/Norky101/graphiteRxDemo/actions/workflows/ci.yml/badge.svg)](https://github.com/Norky101/graphiteRxDemo/actions/workflows/ci.yml)
 
+🔗 **Live demo:** [graphiterx-order-intake.streamlit.app](https://graphiterx-order-intake.streamlit.app/) — drop a sample, see the pipeline run end-to-end.
+
 A LangChain-powered ingestion pipeline that normalizes heterogeneous buyer-side documents (faxed PDF purchase orders, emailed CSV reorder lists, SMS reorder messages) into a single canonical `PurchaseOrder` record, with deterministic redaction of sensitive identifiers and an append-only audit trail.
 
 📖 **[`DEMO.md`](DEMO.md)** — full walkthrough: architecture, real input/output examples, confidence-scoring mechanism, production extensions.
