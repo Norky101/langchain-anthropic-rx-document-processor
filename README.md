@@ -1,165 +1,152 @@
 # graphiteRxDemo
 
-> **Universal order & document intake for healthcare commerce.** Drop a PDF, CSV, or SMS message in. A canonical `PurchaseOrder` comes out — DEA numbers and PHI scrubbed, every ingestion logged for 340B-grade audit. Built with LangChain + Claude.
+A LangChain-powered ingestion pipeline that normalizes heterogeneous buyer-side documents (faxed PDF purchase orders, emailed CSV reorder lists, SMS reorder messages) into a single canonical `PurchaseOrder` record, with deterministic redaction of sensitive identifiers and an append-only audit trail.
 
-> 📖 **Walkthrough doc:** [`DEMO.md`](DEMO.md) — self-contained read with architecture, real input/output examples, and a full explanation of how confidence scoring works.
+📖 **[`DEMO.md`](DEMO.md)** — full walkthrough: architecture, real input/output examples, confidence-scoring mechanism, production extensions.
 
 ---
 
-## What this is
-
-A reference implementation of a multi-format ingestion pipeline for a B2B pharma marketplace. It demonstrates how an LLM acts as a **universal adapter** between heterogeneous buyer-side inputs (faxed POs, emailed reorder spreadsheets, SMS orders) and one canonical schema in a marketplace database.
+## Architecture
 
 ```
 Input file (PDF / CSV / SMS .txt)
         │
         ▼
 ┌──────────────────┐
-│ Format detector  │  ← extension + content sniff
+│ Format detector  │  extension-based routing
 └──────────────────┘
         │
         ▼
 ┌──────────────────┐
-│ Extractor        │  PDF → pypdf  |  CSV → pandas  |  SMS → passthrough
+│ Extractor        │  PDF → pypdf  ·  CSV → pandas  ·  SMS → passthrough
 └──────────────────┘
         │
         ▼
 ┌──────────────────┐
-│ Sensitive-data   │  ← deterministic regex (DEA, account, PHI, phone, email)
-│ scrubber         │     replaces with [REDACTED_TYPE] placeholders
+│ Sensitive-data   │  deterministic regex (DEA, account, phone, email, PHI)
+│ scrubber         │  → typed [REDACTED_*] placeholders
 └──────────────────┘
         │
         ▼
 ┌──────────────────┐
-│ LangChain LLM    │  ← init_chat_model("claude-sonnet-4-6", "anthropic")
-│ structured       │     .with_structured_output(PurchaseOrder)
+│ LangChain LLM    │  init_chat_model("claude-haiku-4-5", "anthropic")
+│ structured       │    .with_structured_output(PurchaseOrder)
 │ extraction       │
 └──────────────────┘
         │
         ▼
 ┌──────────────────┐
-│ Pydantic         │  ← PurchaseOrder + LineItem validation
+│ Pydantic         │  PurchaseOrder + LineItem schema validation
 └──────────────────┘
         │
         ▼
 ┌──────────────────┐
-│ SQLite           │  orders + line_items + audit_log
+│ SQLite           │  orders + line_items + audit_log (append-only)
 └──────────────────┘
 ```
 
-## Why this shape
+The pipeline has three deterministic stages before the LLM (detect, extract, scrub) and one after (validate). The LLM stage is responsible only for schema-aligned extraction from natural-language and tabular text. New input formats are added by extending the extractor map; no other stage changes.
 
-Suppliers on a B2B pharma marketplace receive orders from thousands of long-tail buyers — independent pharmacies, small clinics, hospital pharmacies — most of which **don't have EDI**. Orders arrive via:
+## Why an LLM in this position
 
-- **Faxed PDFs** — purchase orders from a hospital pharmacy to a 503B compounder
-- **Emailed CSVs** — pharmacy chain reorder spreadsheets, columns named however the buyer's staff typed them
-- **SMS / texts** — independents texting their rep: *"need 20 bottles metformin 500mg, account 12345 — Joe at Maple Pharmacy"*
+Buyers on a B2B pharma marketplace originate orders through three persistent channels: faxed PDFs, emailed CSVs with buyer-named columns, and SMS messages. Hand-coding a parser per channel does not scale to long-tail buyers. The LLM acts as a universal adapter from heterogeneous text to one Pydantic schema, so onboarding a new buyer channel does not require code changes — only new sample data and, if needed, a system-prompt revision.
 
-Today, supplier ops teams hand-key these documents into the marketplace or supplier ERP. That's slow, error-prone, and engineering-bottlenecked: every new buyer channel needs a new parser.
-
-The pipeline collapses the "every new format needs new code" problem by routing every input through one LLM-backed extraction stage that aligns to a single Pydantic schema. New formats join automatically; the only thing that grows is the audit log.
-
-The LLM does **only** what frontier models are uniquely good at: schema-aligned extraction from messy text. Everything sensitive — redaction, validation — stays deterministic so compliance reviewers get predictable behavior.
+Compliance-relevant work (redaction, schema enforcement) stays deterministic. The model never sees raw sensitive identifiers and cannot bypass schema validation.
 
 ## Quick start
 
 ```bash
-# install deps (uv handles Python 3.13 too)
 uv sync
 
-# get an Anthropic API key at https://console.anthropic.com (5 min, $5 credit)
 cp .env.example .env
-# edit .env and paste your key
+# paste an Anthropic API key from console.anthropic.com
 
-# run the pipeline against the sample inputs
 uv run python ingest.py samples/sms_orders.txt samples/reorder_list.csv samples/purchase_order.pdf
-
-# inspect the audit log
 uv run python ingest.py --show-audit
-
-# or run the Streamlit UI
 uv run streamlit run app.py
 ```
 
-Demo cost: ~$0.10 against the bundled samples.
+Cost against the bundled samples: ~$0.10 on Haiku 4.5.
 
 ## Sample inputs
 
-The `samples/` folder contains three deliberately-different inputs that exercise each stage:
-
-| File | Channel | What it tests |
+| File | Format | Description |
 |---|---|---|
-| `samples/purchase_order.pdf` | Faxed PO | pypdf extraction; regex catches DEA, account #, phone, email, PHI in the free-text note |
-| `samples/reorder_list.csv` | Emailed buyer reorder | Non-canonical headers (`Acct, NDC#, item, strngth, pkg, qty, ship_by`) — the LLM does the schema mapping |
-| `samples/sms_orders.txt` | SMS log from independents | The hardest case: each line is a free-text order, sometimes with DEA or account inline, sometimes ambiguous (one line is intentionally too vague — confidence drops below 0.5 and `flagged_fields` lights up) |
+| `samples/purchase_order.pdf` | PDF | Faxed PO from a hospital pharmacy to a 503B compounder. DEA, account, phone, email, and PHI in a free-text note. |
+| `samples/reorder_list.csv` | CSV | Pharmacy chain weekly reorder. Buyer-named columns (`Acct, NDC#, item, strngth, pkg, qty, ship_by`). |
+| `samples/sms_orders.txt` | SMS | Seven messages from independent pharmacies. Mix of clear orders, DEA + PHI, and one deliberately ambiguous request. |
+| `samples/sms_quick.txt` | SMS | Three-message variant for shorter walkthroughs. |
+| `samples/buyer_chaos.csv` | CSV | More extreme header variation. |
+| `samples/sms_edge_cases.txt` | SMS | Meta-cases: vague drug name, abbreviated date, multi-line-item single SMS. |
 
-`scripts/make_pdf.py` regenerates the sample PDF if you want to tweak it.
+`scripts/make_pdf.py` regenerates the sample PDF.
 
 ## CLI
 
 ```
-uv run python ingest.py <files...>     # ingest each file end-to-end
+uv run python ingest.py <files...>     # ingest each file
 uv run python ingest.py --show-audit   # dump the audit log
 ```
 
-Each ingestion writes:
-
-* one row in `orders` (with foreign keys to one or more `line_items`)
-* one row in `audit_log` (timestamps, redaction counts by type, LLM confidence, flagged fields, status)
+Each ingestion writes one row to `orders` (with FKs to `line_items`) and one row to `audit_log` (timestamps, redaction counts by type, LLM confidence, flagged fields, status).
 
 ## Streamlit UI
 
-`uv run streamlit run app.py` opens a drop-zone that runs any file through the same pipeline and renders three columns:
-
-1. The scrubbed source text (with `[REDACTED_*]` placeholders)
-2. The canonical `PurchaseOrder` JSON the LLM produced
-3. The audit-log row that was just appended
-
-Deploys cleanly to [Streamlit Community Cloud](https://share.streamlit.io) — set `ANTHROPIC_API_KEY` as a secret under *Manage app → Secrets* before first run.
-
-## Production deployment notes
-
-The same code runs against AWS Bedrock by changing one argument to `init_chat_model`:
-
-```python
-# local / direct Anthropic
-model = init_chat_model("claude-sonnet-4-6", model_provider="anthropic")
-
-# Bedrock (HIPAA BAA AWS account)
-model = init_chat_model("anthropic.claude-sonnet-4-6", model_provider="bedrock_converse")
+```bash
+uv run streamlit run app.py
 ```
 
-`bedrock_converse` also supports Llama, Cohere, and Titan with the same call signature — multi-LLM orchestration without code changes. Set `LLM_PROVIDER` and `LLM_MODEL` env vars to swap at runtime.
+The UI presents per-document panels with three views: the original raw text (demo only), the scrubbed text passed to the LLM with redaction tokens highlighted, and the canonical `PurchaseOrder` output with confidence-routing badge. The full audit log renders as a sortable table at the bottom.
 
-For pharma deployments:
+The UI is rate-limited via `st.session_state` to a configurable number of ingestions per browser session (`DEMO_INGEST_QUOTA`, default `5`) to bound API spend on public deployments.
 
-- SQLite → RDS (Postgres or Aurora) inside a HIPAA BAA AWS account.
-- Streamlit → FastAPI service behind API Gateway, with a Next.js front-end on Cloudflare Pages or Vercel.
-- Inbox watcher / SMS webhook / S3 ObjectCreated event triggers the pipeline; structured outputs feed the marketplace and the audit log lands in a tamper-evident store.
+### Deployment to Streamlit Community Cloud
 
-## What's not built here
+1. Push the repository to GitHub.
+2. At [share.streamlit.io](https://share.streamlit.io), create a new app pointing at `app.py`.
+3. Under *Manage app → Secrets*, add:
+   ```
+   ANTHROPIC_API_KEY = "sk-ant-..."
+   DEMO_INGEST_QUOTA = "5"
+   ```
+4. Set a monthly spend cap on the Anthropic API key at [console.anthropic.com → Billing](https://console.anthropic.com/settings/billing) to bound worst-case cost.
 
-| Skipped | How it'd ship |
+## Production deployment
+
+The same code targets AWS Bedrock by changing the model provider:
+
+```python
+init_chat_model("anthropic.claude-sonnet-4-6", model_provider="bedrock_converse")
+```
+
+`bedrock_converse` exposes Claude, Llama, Cohere, and Titan via a unified Converse API, so multi-LLM orchestration is a configuration change. Operationally, Bedrock requires `langchain-aws`, AWS credentials, and a Bedrock model-access request.
+
+A pharma deployment would replace SQLite with RDS (Postgres or Aurora) inside a HIPAA BAA AWS account, run this pipeline as a FastAPI service behind API Gateway, and trigger ingestion from inbox watchers, SMS webhooks, or S3 `ObjectCreated` events.
+
+## Out of scope
+
+| Skipped | Production answer |
 |---|---|
 | OCR for scanned faxes | Textract or Tesseract upstream of the extractor stage |
 | Production-grade PHI/PII detection | AWS Comprehend Medical or Microsoft Presidio in place of regex |
-| Column-aware CSV scrubbing | Regex catches free-text patterns; columnar PII (e.g. `Acct` column values) needs schema-aware redaction |
-| Idempotency / dedupe | Content-hash + buyer-account-PO-number dedupe key + replay table |
-| Multi-LLM live failover | LangChain's `with_fallbacks()` over multiple `bedrock_converse` model IDs |
-| Authentication / multi-tenancy | API Gateway + per-supplier auth; SQLite has no concept of tenants |
-| Tests | One smoke test would be the next addition; production gets unit + a regression-per-bug |
+| Column-aware CSV scrubbing | Schema-aware redaction by header name |
+| Idempotency / dedupe | Content-hash + buyer-account-PO-number dedupe key with replay table |
+| Multi-LLM live failover | LangChain `with_fallbacks()` over multiple `bedrock_converse` model IDs |
+| Authentication / multi-tenancy | API Gateway + per-supplier auth; row-level security in RDS |
+| Test coverage | Per-stage unit + a regression-per-bug |
 
-## Repo layout
+## Repository layout
 
 ```
 graphiteRxDemo/
+├── DEMO.md                 # full walkthrough document
 ├── samples/                # PDF, CSV, SMS sample inputs
 ├── scripts/make_pdf.py     # regenerates the sample PDF
 ├── src/
 │   ├── schema.py           # PurchaseOrder + LineItem Pydantic models
 │   ├── detector.py         # format routing
 │   ├── extractors.py       # pdf / csv / sms extractors
-│   ├── scrubber.py         # regex DEA / account / PHI redaction
+│   ├── scrubber.py         # regex sensitive-data redaction
 │   ├── llm.py              # LangChain structured-output chain
 │   ├── storage.py          # SQLite ops + audit log
 │   └── pipeline.py         # orchestration

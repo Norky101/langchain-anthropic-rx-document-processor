@@ -1,150 +1,117 @@
-# Demo Walkthrough
+# Order & Document Intake Pipeline — Walkthrough
 
-> **A self-contained read.** If you didn't write this, you should still be able to walk through it and understand what's happening, why it matters, and what the LLM is actually doing — without anyone explaining.
-
----
-
-## 1. The problem this solves
-
-A B2B pharma marketplace platform serves suppliers (manufacturers, distributors, 503B compounders) selling to thousands of long-tail buyers — independent pharmacies, small clinics, hospital pharmacies. **Most of those buyers don't have EDI.** So orders show up as:
-
-- Faxed PDFs from a hospital pharmacy
-- Emailed CSVs from a pharmacy chain's POS export
-- SMS texts from an independent: *"need 20 bottles metformin 500mg, account 12345 — Joe at Maple"*
-
-Today, supplier ops teams hand-key these into the marketplace or supplier ERP. That's the bottleneck on supplier onboarding and on serving the long-tail buyer. It's also error-prone (wrong NDC = recall risk) and compliance-hostile (no consistent audit trail; sensitive data sits in inboxes).
-
-**This demo is the universal-adapter solution.** Bytes in any of those three formats land as the same canonical `PurchaseOrder` in the marketplace database, with sensitive data scrubbed, every ingestion logged, and uncertain extractions explicitly flagged for human review.
+A LangChain-powered ingestion pipeline that normalizes heterogeneous buyer-side documents (faxed PDF purchase orders, emailed CSV reorder lists, SMS reorder messages) into a single canonical `PurchaseOrder` schema, with deterministic redaction of sensitive identifiers and an append-only audit trail.
 
 ---
 
-## 2. Architecture and tech stack
+## 1. Problem
+
+A B2B pharma marketplace serves suppliers (manufacturers, distributors, 503B compounders) selling to a long tail of independent pharmacies, small clinics, and hospital pharmacies. The bulk of those buyers do not run EDI. Orders arrive through three persistent channels:
+
+- Faxed PDF purchase orders
+- Emailed CSV reorder spreadsheets, with column names chosen by the buyer
+- SMS messages from buyer staff to a supplier rep
+
+Today these documents are hand-keyed into the marketplace or supplier ERP. The cost is operational (time per document), commercial (multi-day fulfillment lag), risk-related (NDC and quantity errors), and compliance-related (sensitive identifiers persist in inboxes; no consistent audit trail).
+
+This pipeline replaces the hand-key step. Bytes in any of the three formats land as the same canonical record in the marketplace database, with sensitive identifiers redacted, every ingestion logged, and uncertain extractions explicitly routed to a human review queue.
+
+---
+
+## 2. Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │  INBOUND DOCUMENT                                                │
-│  ─────────────────                                               │
 │  PDF · CSV · SMS .txt                                            │
 └──────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  1. DETECT                                  src/detector.py     │
-│  ─────────                                                       │
 │  Extension routing (.pdf → pdf, .csv → csv, .txt → sms)          │
-│                                                                  │
-│  In production, this is the seam where an inbox watcher /        │
-│  SMS webhook / S3 ObjectCreated event hands off into the         │
-│  pipeline.                                                       │
+│  Production: inbox watcher / SMS webhook / S3 ObjectCreated      │
 └──────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  2. EXTRACT                                 src/extractors.py   │
-│  ──────────                                                      │
-│  PDF → pypdf.PdfReader(path).extract_text()                      │
-│  CSV → pandas.read_csv(path).to_string() — original headers      │
-│        preserved verbatim so the LLM does the schema mapping     │
-│  SMS → split per line, one extraction unit per message           │
-│                                                                  │
-│  Each extractor returns list[str]. PDF and CSV give one entry;   │
-│  SMS gives N entries (one per message). The pipeline iterates.   │
+│  PDF → pypdf.PdfReader.extract_text()                            │
+│  CSV → pandas.read_csv with original headers preserved           │
+│  SMS → split per non-empty line                                  │
+│  Returns list[str]; PDF/CSV give one entry, SMS one per message  │
 └──────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  3. SCRUB                                   src/scrubber.py     │
-│  ────────                                                        │
 │  Deterministic regex → typed placeholders                        │
-│                                                                  │
-│    DEA       [A-Z]{2}\d{7}              →  [REDACTED_DEA]        │
-│    Account   acct/account/customer + value → [REDACTED_ACCOUNT]  │
-│    Routing   routing/aba + 9-digit       →  [REDACTED_ROUTING]   │
-│    SSN       \d{3}-\d{2}-\d{4}           →  [REDACTED_SSN]       │
-│    Phone     ###-###-####                →  [REDACTED_PHONE]     │
-│    Email     name@host                   →  [REDACTED_EMAIL]     │
-│    PHI       "patient/pt/for" + Cap Cap  →  [REDACTED_PHI]       │
-│                                                                  │
-│  Per-type counts surface in the audit log. Runs BEFORE the LLM   │
-│  so the model never sees raw sensitive values — minimizes        │
-│  data-handling risk for the model provider.                      │
-│                                                                  │
-│  Why deterministic, not LLM-based: compliance reviewers want     │
-│  predictable, auditable redaction. LLMs hallucinate.             │
+│   DEA       [A-Z]{2}\d{7}              →  [REDACTED_DEA]         │
+│   Account   acct/account/customer + #  →  [REDACTED_ACCOUNT]     │
+│   Routing   routing/aba + 9-digit      →  [REDACTED_ROUTING]     │
+│   SSN       \d{3}-\d{2}-\d{4}          →  [REDACTED_SSN]         │
+│   Phone     ###-###-####               →  [REDACTED_PHONE]       │
+│   Email     name@host                  →  [REDACTED_EMAIL]       │
+│   PHI       "patient/pt/for" + name    →  [REDACTED_PHI]         │
+│  Per-type counts surface in the audit log.                       │
+│  Runs before the LLM stage; the model never sees raw values.     │
 └──────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│  4. STRUCTURED EXTRACTION  ←  the LLM      src/llm.py           │
-│  ──────────────────────────                                      │
+│  4. STRUCTURED EXTRACTION  ←  the LLM       src/llm.py          │
 │  langchain.chat_models.init_chat_model(                          │
 │      "claude-haiku-4-5-20251001",                                │
 │      model_provider="anthropic"                                  │
 │  ).with_structured_output(PurchaseOrder)                         │
-│                                                                  │
-│  One call per extraction unit. The model receives:               │
-│    - a system prompt explaining the canonical schema, the        │
-│      placeholder convention, and the confidence/flag rules       │
-│    - the scrubbed source text                                    │
-│  And returns a populated PurchaseOrder Pydantic object.          │
-│                                                                  │
-│  Provider swap to AWS Bedrock is one argument:                   │
-│    init_chat_model("anthropic.claude-...", "bedrock_converse")   │
-│  Plus AWS creds, langchain-aws install, model-access request.    │
+│  One LLM call per extraction unit. Provider swappable to         │
+│  bedrock_converse via env var (LLM_PROVIDER, LLM_MODEL).         │
 └──────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  5. VALIDATE                                src/schema.py       │
-│  ───────────                                                     │
 │  Pydantic v2 PurchaseOrder + LineItem                            │
-│  Hard schema gate. ValidationError → audit row "rejected",       │
-│  no DB write, surfaces in CLI / Streamlit as a red card.         │
+│  ValidationError → audit row "rejected", no DB write             │
 └──────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  6. PERSIST                                 src/storage.py      │
-│  ──────────                                                      │
-│  sqlite3 (stdlib). Three tables:                                 │
+│  sqlite3. Three tables:                                          │
 │    orders        — one row per accepted PurchaseOrder            │
-│    line_items    — one row per LineItem, FK to orders            │
+│    line_items    — one row per LineItem (FK to orders.id)        │
 │    audit_log     — one row per ingestion attempt (accepted OR    │
-│                    rejected): timestamps, source file, format,   │
-│                    redaction counts BY TYPE, llm_confidence,     │
-│                    flagged_fields, status, reason                │
-│                                                                  │
-│  Append-only audit_log is the 340B-grade compliance trail.       │
-│  In prod: SQLite → RDS Postgres / Aurora; tamper-evident store.  │
+│                    rejected). Append-only.                       │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**Stack summary:** Python 3.13 + uv · LangChain + langchain-anthropic · Pydantic v2 · pypdf · pandas · sqlite3 · Streamlit · python-dotenv · reportlab (sample-PDF generation only).
+Stack: Python 3.13 (uv) · LangChain + langchain-anthropic · Pydantic v2 · pypdf · pandas · sqlite3 · Streamlit · python-dotenv.
 
-**Why this shape:** three deterministic stages before the LLM (detect, extract, scrub) and one after (validate). The LLM is the *only* non-deterministic stage. Anything compliance-relevant — redaction, schema enforcement — stays predictable.
+The pipeline has three deterministic stages before the LLM (detect, extract, scrub) and one after (validate). Schema enforcement and redaction stay predictable; the LLM is responsible only for schema-aligned extraction from natural language and tabular text.
 
 ---
 
-## 3. End-to-end flow: real input → real output
+## 3. Input → output examples
 
-These are actual outputs from running the pipeline with `claude-haiku-4-5-20251001`. Nothing in this section is invented.
+All output below is from live runs against `claude-haiku-4-5-20251001`.
 
-### Example A — SMS, the textbook case
+### Example A — SMS
 
-**Raw input** (one line of `samples/sms_orders.txt`):
+Raw input (one line of `samples/sms_orders.txt`):
 ```
 hi this is sarah at lakeside rx, can we get 3 boxes of lisinopril 20 mg,
 90 ct each — patient John Doe needs starting Monday — acct 55510
 ```
 
-**After the scrubber** (what the LLM actually sees):
+After the scrubber (text passed to the LLM):
 ```
 hi this is sarah at lakeside rx, can we get 3 boxes of lisinopril 20 mg,
 90 ct each — patient [REDACTED_PHI] needs starting Monday — acct [REDACTED_ACCOUNT]
 ```
-Redactions: `{ACCOUNT: 1, PHI: 1}` — the patient name and account number never reach the LLM.
+Redactions: `{ACCOUNT: 1, PHI: 1}`.
 
-**Canonical PurchaseOrder** (what comes out, written to SQLite):
+Canonical PurchaseOrder written to SQLite:
 ```json
 {
   "source_format": "sms",
@@ -168,22 +135,16 @@ Redactions: `{ACCOUNT: 1, PHI: 1}` — the patient name and account number never
 }
 ```
 
-What the LLM did that's hard with rules alone:
-- Inferred the buyer name (`Lakeside Rx`) from a casual greeting (*"hi this is sarah at lakeside rx"*)
-- Resolved the relative date (*"starting Monday"*) to a concrete `2026-05-03`
-- Pulled `quantity=3` and `unit_of_measure="box"` from natural prose
-- Preserved the redaction placeholders verbatim
+### Example B — Ambiguous SMS
 
-### Example B — SMS, the human-review case
-
-**Raw input** (last line of `samples/sms_orders.txt`):
+Raw input:
 ```
 need to order more of the usual — Joe @ Maple
 ```
 
-**After the scrubber**: identical (nothing matches a redaction pattern).
+After scrubber: identical (no redaction patterns matched).
 
-**Canonical PurchaseOrder**:
+Canonical PurchaseOrder:
 ```json
 {
   "source_format": "sms",
@@ -193,7 +154,6 @@ need to order more of the usual — Joe @ Maple
     {
       "drug_name": "<UNKNOWN>",
       "strength": null,
-      "package_size": null,
       "quantity": 0,
       "unit_of_measure": null
     }
@@ -209,22 +169,19 @@ need to order more of the usual — Joe @ Maple
 }
 ```
 
-This is the demo's **money moment**. The LLM doesn't pretend to know what *"more of the usual"* means. It explicitly flags every uncertain field and drops `confidence` to 0.15. Anything below 0.5 routes to a human-review queue rather than the marketplace — the audit log captures it for the rep to call Joe back.
+The model populates `<UNKNOWN>` for the drug name, sets quantity to zero, and sets `confidence` below the auto-route threshold. The audit log records this row with `status='accepted'` (Pydantic-valid) and the marketplace integration consumes only records where `confidence >= 0.7`. Anything below that threshold routes to a human review queue.
 
-### Example C — CSV, the schema-mapping case
+### Example C — CSV with non-canonical headers
 
-**Raw input** (`samples/reorder_list.csv`, headers chosen by the buyer):
+Raw input (`samples/reorder_list.csv`):
 ```
 Acct,NDC#,item,strngth,pkg,qty,ship_by
 RV-7821,68180-0517-09,Lisinopril,20 mg,90 ct btl,8,2026-05-02
 RV-7821,57664-0395-13,Atorvastatin,40 mg,90 ct btl,6,2026-05-02
-RV-7821,00378-0114-77,Metformin HCl,500 mg,500 ct btl,4,2026-05-02
 …
 ```
 
-**After scrubber**: 0 redactions (no preceding label words like "acct" / "patient"; CSV column-aware redaction is a documented scope cut).
-
-**Canonical PurchaseOrder** (truncated to two of six line items):
+Canonical PurchaseOrder (truncated):
 ```json
 {
   "source_format": "csv",
@@ -239,30 +196,21 @@ RV-7821,00378-0114-77,Metformin HCl,500 mg,500 ct btl,4,2026-05-02
       "quantity": 8,
       "unit_of_measure": "bottle"
     },
-    {
-      "drug_name": "Atorvastatin",
-      "ndc": "57664-0395-13",
-      "strength": "40 mg",
-      "package_size": "90 ct bottle",
-      "quantity": 6,
-      "unit_of_measure": "bottle"
-    }
-    // … 4 more
+    …
   ],
-  "confidence": 0.95,
-  "flagged_fields": []
+  "confidence": 0.95
 }
 ```
 
-The buyer typed `Acct, NDC#, item, strngth, pkg, qty, ship_by` — none of those are the canonical field names. Nobody hand-coded a column-aliasing table. The LLM mapped them all on its own, including `pkg=90 ct btl` → `package_size="90 ct bottle"` (it expanded the abbreviation). This is the part that makes the pipeline survivable when a new buyer shows up next month with a different spreadsheet.
+The buyer's headers (`Acct`, `NDC#`, `item`, `strngth`, `pkg`, `qty`, `ship_by`) are mapped to the canonical schema fields without a hand-coded alias table. New buyer spreadsheets with different headers do not require code changes.
 
-### Example D — PDF, the full faxed-PO case
+### Example D — Faxed PO PDF
 
-**Raw input** (`samples/purchase_order.pdf`, after pypdf): contains DEA `AB1234567`, account `SM-44012`, fax/phone numbers, an email, and a free-text note *"Rush order — patient John Doe needs vancomycin starting Friday"*.
+Raw input (`samples/purchase_order.pdf`, after pypdf): a single-page faxed PO from St. Mary's Hospital Pharmacy to a 503B compounder, containing a DEA number, account number, fax/phone numbers, an email, and a free-text note `"Rush order — patient John Doe needs vancomycin starting Friday"`.
 
-**After scrubber**: 7 redactions across 5 types: `{DEA: 1, ACCOUNT: 1, PHONE: 3, EMAIL: 1, PHI: 1}`.
+Scrubber output: 7 redactions across 5 types — `{DEA: 1, ACCOUNT: 1, PHONE: 3, EMAIL: 1, PHI: 1}`.
 
-**Canonical PurchaseOrder** (excerpts):
+Canonical PurchaseOrder (excerpts):
 ```json
 {
   "source_format": "pdf",
@@ -281,108 +229,123 @@ The buyer typed `Acct, NDC#, item, strngth, pkg, qty, ship_by` — none of those
     { "drug_name": "Sodium bicarbonate inj.", "ndc": "00074-1551-01",
       "strength": "8.4% 50mL", "package_size": "10 vial case", "quantity": 6 }
   ],
-  "confidence": 0.95,
-  "flagged_fields": []
+  "confidence": 0.95
 }
 ```
 
-The free-text note's patient PHI never reaches the marketplace. The DEA and account number are present in the canonical record only as typed placeholders, which means downstream analytics can join on `buyer_account_ref` without ever touching the actual account number.
+The patient name in the free-text note is redacted at the scrubber stage and never reaches the model or the database.
 
 ---
 
-## 4. How confidence scoring works
+## 4. Confidence scoring
 
-This is the most important section to be honest about. **Confidence is LLM-self-reported**, not a calibrated probability.
+### Mechanism
 
-### The mechanism
-The `PurchaseOrder` schema has two fields the LLM populates alongside the data:
+Confidence is produced by the same LLM call that produces the structured data. The `PurchaseOrder` schema includes two model-populated fields:
 
 ```python
-confidence: float = Field(ge=0, le=1, description="Self-rated 0–1")
-flagged_fields: list[str] = Field(
-    description="Field paths the model is uncertain about"
-)
+confidence: float = Field(ge=0, le=1)
+flagged_fields: list[str] = Field(default_factory=list)
 ```
 
-The system prompt (`src/llm.py`) instructs the model:
+The system prompt (`src/llm.py`) directs the model to:
 
-> *Set confidence honestly. If the buyer didn't specify a quantity or drug strength, mark those fields in flagged_fields and lower confidence accordingly. A confidence below 0.5 will route the record to human review.*
+1. Populate every required field. For fields not clearly stated in the source, infer where reasonable, or use a sentinel (`<UNKNOWN>`, `0`) and add the field path to `flagged_fields`.
+2. Set `confidence` based on the proportion of fields it could ground in source text vs. infer or guess.
+3. Lower `confidence` to under 0.5 when critical fields (drug name, quantity) are unrecoverable from the input.
 
-So confidence comes from the same forward pass that produces the data. The model writes the JSON and rates its own work in one shot.
+The model has direct visibility into its own generation: for each field it emits, it can distinguish between values it located in the source text and values it generated by inference. Confidence is that introspection summarized as a scalar.
 
-### What confidence values mean in practice
+### Routing thresholds
 
-| Range | UI badge | Meaning | Real example from the demo data |
-|---|---|---|---|
-| 0.85–1.00 | 🟢 | All required fields clearly present | Faxed PO with structured table; CSV with named columns |
-| 0.65–0.84 | 🟡 | One or two fields inferred or ambiguous | SMS with shorthand drug name (*"amox"* → "Amoxicillin"), inferred packaging |
-| 0.50–0.64 | 🟡 | Multiple fields inferred; review recommended | SMS missing quantity but drug clear |
-| < 0.50 | 🔴 | Critical fields unknown; **route to human review** | *"need to order more of the usual"* → 0.15 |
+| Range | Routing | Meaning |
+|---|---|---|
+| `>= 0.70` | Auto-route to marketplace | Required fields all sourced; no flags expected |
+| `0.50 – 0.69` | Review queue, low priority | One or two inferred fields; reviewer confirms |
+| `< 0.50` | Review queue, high priority | Critical fields missing or guessed |
 
-### Why this is a useful signal even though it's not calibrated
+The thresholds are configurable. They are surfaced to operators via the audit log and to the UI via colored badges.
 
-It's a **soft signal**, but it's the one signal the LLM is best positioned to give. The model knows what the input said and what its own output guessed, so it can compare them. That's harder for an external rule.
+### What confidence is, and what it is not
 
-The score is paired with `flagged_fields`, which is the more actionable output — it tells you *which* fields the human reviewer needs to confirm. Together they let the system route confidently extracted records straight to the marketplace and uncertain ones to a queue.
+Confidence is a soft signal derived from a single forward pass. It is useful because the LLM has private information about its own generation that an external rule lacks. It is not a calibrated probability: two records with `confidence = 0.85` are not guaranteed to have identical accuracy, and scores will drift if the model or prompt changes.
 
-### What this doesn't claim
+The `flagged_fields` list is the more actionable output. It identifies exactly which fields a human reviewer should verify, which makes the human-in-the-loop step bounded.
 
-- It isn't a calibrated probability. Two records with `confidence=0.85` are not guaranteed to have the same true accuracy.
-- The model can be overconfident on hallucinated fields (any LLM can). For high-stakes deployments you'd add cross-checks: NDC format validation against a master list, drug name checks against an FDA orange-book lookup, etc.
-- It's a single-shot estimate. More rigorous setups vote across N samples, or use a separate judge model.
+### Production extensions
 
-### What I'd add for production
+A production deployment would augment the LLM-derived score with:
 
-1. **Schema-level sanity rules** — *"if NDC is set, it must be 10 or 11 digits."* `flagged_fields` gets `ndc` appended automatically when violated.
-2. **Cross-field plausibility** — *"if drug_name is 'Vancomycin' and strength missing, flag."*
-3. **Multi-shot voting** — call the LLM N=3 times; if confidence < 0.8 and outputs disagree, route to review even if any single call rated high.
-4. **Telemetry** — log confidence vs. eventual outcome (accepted/edited/rejected by humans) and recalibrate the threshold.
-
-For a 3-hour demo, the LLM-self-report is the right primitive. For production it's the foundation, not the whole compliance story.
+1. Schema-level sanity rules. Example: NDC values must be 10 or 11 digits; the validator appends `line_items[*].ndc` to `flagged_fields` automatically when violated.
+2. Cross-field plausibility. Example: a `Vancomycin` line item with a null `strength` is flagged regardless of model confidence.
+3. Multi-shot voting. The pipeline calls the LLM `N` times; if any single call rates `confidence < 0.8` or any field disagrees across calls, the record routes to review.
+4. Closed-loop calibration. Reviewer outcomes (accepted / corrected / rejected) feed back as training signal; thresholds are recalibrated periodically.
 
 ---
 
-## 5. What you'll see when you run it
+## 5. The audit log
 
-```bash
-# 1. one-shot CLI on all samples
-uv run python ingest.py samples/sms_orders.txt samples/reorder_list.csv samples/purchase_order.pdf
+Every ingestion attempt — accepted or rejected — appends one row to `audit_log`. Schema:
 
-# 2. inspect the audit trail
-uv run python ingest.py --show-audit
-
-# 3. interactive UI
-uv run streamlit run app.py
+```sql
+CREATE TABLE audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+    source_file TEXT NOT NULL,
+    source_format TEXT NOT NULL,
+    order_id INTEGER REFERENCES orders(id),
+    redaction_count_by_type TEXT NOT NULL,   -- JSON: {"DEA": 1, "ACCOUNT": 1, ...}
+    llm_confidence REAL,
+    flagged_fields TEXT NOT NULL,            -- JSON array of field paths
+    status TEXT NOT NULL,                    -- 'accepted' or 'rejected'
+    reason TEXT                              -- error detail if rejected
+);
 ```
 
-The Streamlit UI is what someone unfamiliar with the project would interact with: a drop-zone, then for each input a three-column panel showing scrubbed source, canonical JSON, and the audit row. SMS files render as one panel per message; PDFs and CSVs render as one panel for the file.
+Surfaces:
+
+- **CLI:** `uv run python ingest.py --show-audit` dumps the table.
+- **SQL:** `sqlite3 store.db "select * from audit_log order by id desc"`.
+- **Streamlit:** the per-result panel shows the audit row that was just written; the bottom of the page shows the full table.
+
+The audit log supports 340B-relevant procurement compliance reviews by recording, per inbound document: the source channel, the redaction signature (which sensitive types were present), the model confidence, the reviewer-actionable flag list, and the accept/reject decision. In production the table would land in a tamper-evident store (append-only DynamoDB, Postgres with logical replication to S3 with object lock, etc.).
 
 ---
 
-## 6. What's not here (and the answer if asked)
+## 6. Sample reference
+
+| File | Format | Description |
+|---|---|---|
+| `samples/purchase_order.pdf` | PDF | Faxed PO from a hospital pharmacy to a 503B compounder. Contains DEA, account, phone, email, and PHI in a free-text note. |
+| `samples/reorder_list.csv` | CSV | Pharmacy chain weekly reorder. Buyer-named columns: `Acct, NDC#, item, strngth, pkg, qty, ship_by`. |
+| `samples/sms_orders.txt` | SMS | Seven messages from independent pharmacies. Mix of clear orders, DEA + PHI, and one deliberately ambiguous request. |
+| `samples/sms_quick.txt` | SMS | Three-message variant for short walkthroughs. |
+| `samples/buyer_chaos.csv` | CSV | More extreme header variation: `Customer Number, DRUG, Dose / Form, Pkg, How Many, Want By`. |
+| `samples/sms_edge_cases.txt` | SMS | Meta-cases: `"50 vials of nothing"`, abbreviated date formats, multi-line-item single SMS using prescriber shorthand. |
+
+---
+
+## 7. Out of scope (and the production answer)
 
 | Skipped | Production answer |
 |---|---|
-| OCR for scanned faxes | Textract or Tesseract upstream of the extractor stage. One stage prepended; no other changes. |
-| Production-grade PHI/PII detection | AWS Comprehend Medical or Microsoft Presidio in place of regex. Same scrubber interface. |
-| Column-aware CSV redaction | Schema-aware redaction by header name. The `Acct` column would have its values replaced. |
-| Idempotency / dedupe | Content-hash + buyer-account-PO-number dedupe key, with a replay table for re-ingesting failures. |
-| AWS Bedrock execution | Code change: one line. Infra: install `langchain-aws`, configure AWS credentials, request Bedrock model access, swap model ID format. ~20 min if AWS account is set up. |
-| Multi-LLM live failover | LangChain's `with_fallbacks()` over multiple `bedrock_converse` model IDs (Claude → Llama → Cohere). |
-| Multi-tenancy / authentication | API Gateway + per-supplier auth; SQLite has no concept of tenants. RDS schema-per-supplier or row-level-security. |
-| Tests | One smoke test per stage would be the immediate next addition. Production gets unit + a regression-per-bug. |
-| Real React/Next.js UI | UI is Streamlit because of the time-box. Production would be Next.js on Cloudflare Pages or Vercel, talking to a FastAPI service running this LangChain pipeline. |
+| OCR for scanned faxes | Textract or Tesseract upstream of the extractor stage; one stage prepended, no downstream changes. |
+| Production-grade PHI/PII detection | AWS Comprehend Medical or Microsoft Presidio in place of regex; same scrubber interface. |
+| Column-aware CSV redaction | Schema-aware redaction by header name (the `Acct` column's values would be replaced inline). |
+| Idempotency / dedupe | Content-hash + buyer-account-PO-number dedupe key; replay table for re-ingesting failures. |
+| AWS Bedrock execution | One-line code change (`model_provider="bedrock_converse"`); operationally requires `langchain-aws`, AWS credentials, Bedrock model-access request. |
+| Multi-LLM live failover | LangChain `with_fallbacks()` over multiple `bedrock_converse` model IDs (Claude → Llama → Cohere). |
+| Multi-tenancy / authentication | API Gateway + per-supplier auth; row-level security or schema-per-supplier in RDS. |
+| Tests | Per-stage unit + a regression-per-bug. |
+| Production UI | Next.js on Cloudflare Pages or Vercel; FastAPI service running this LangChain pipeline behind API Gateway. |
 
 ---
 
-## 7. Adjacent things this same pipeline does
+## 8. Adjacent applications
 
-The cost of adding a new ingestion target is **one Pydantic model** (and maybe a different system prompt). The detect → extract → scrub → LLM → validate → persist shape stays identical. Examples:
+The same six-stage pipeline applies to other supplier-side intake problems by changing the output Pydantic model and the system prompt. No code changes elsewhere.
 
 - **Supplier catalog onboarding** — manufacturer product master in CSV/Excel/PDF spec sheets → canonical product schema in the marketplace PIM.
-- **340B compliance documentation intake** — covered-entity attestations, eligibility letters, audit trails. The audit-log story becomes the centerpiece.
-- **AP/AR document reconciliation** — invoices, credit memos, EOBs in PDF/CSV/email. Match against open POs in the marketplace.
-- **Long-tail buyer onboarding** — new pharmacy joining the marketplace, bringing reorder history from a POS export. Same pipeline.
+- **340B compliance documentation intake** — covered-entity attestations, eligibility letters, audit trails.
+- **AP/AR document reconciliation** — invoices, credit memos, EOBs in PDF/CSV/email; matched against open POs.
 - **Cross-supplier price/availability normalization** — competitor feeds in heterogeneous formats → canonical price comparison view.
-
-Each of these is one Pydantic schema and a system-prompt edit away. The infrastructure already exists.
