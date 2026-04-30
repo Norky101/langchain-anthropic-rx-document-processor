@@ -2,7 +2,7 @@
 
 Run once:  uv run python scripts/make_slides.py
 
-Output:    slides/graphiterx_demo.pptx
+Output:    slides/rx_document_processor.pptx
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pptx.enum.text import PP_ALIGN
 from pptx.util import Emu, Inches, Pt
 
 
-# ─── Brand palette (from graphiterx.com) ─────────────────────────────────────
+# ─── Brand palette ───────────────────────────────────────────────────────────
 NAVY = RGBColor(0x18, 0x19, 0x3F)
 TEAL = RGBColor(0x00, 0xA8, 0xB3)
 TINT = RGBColor(0xD2, 0xE5, 0xE5)
@@ -99,12 +99,12 @@ def add_filled_rect(slide, *, left, top, width, height, color: RGBColor):
 
 
 def add_brand_header(slide, title: str, subtitle: str | None = None):
-    """Top brand bar with the GraphiteRx pill, slide title, and an optional kicker."""
+    """Top brand bar with the project pill, slide title, and an optional kicker."""
     # Top accent bar
     add_filled_rect(slide, left=Inches(0), top=Inches(0), width=Inches(13.33), height=Inches(0.16), color=TEAL)
 
     # Brand pill
-    pill_w = Inches(1.4)
+    pill_w = Inches(2.1)
     pill_h = Inches(0.32)
     pill = add_chip(
         slide,
@@ -112,7 +112,7 @@ def add_brand_header(slide, title: str, subtitle: str | None = None):
         top=Inches(0.45),
         width=pill_w,
         height=pill_h,
-        text="GRAPHITERX",
+        text="RX DOC PROCESSOR",
         fill=TEAL,
         font_color=WHITE,
         size=10,
@@ -711,7 +711,7 @@ def main() -> None:
     slide_4_compliance(prs)
     slide_5_outputs(prs)
 
-    out = Path(__file__).resolve().parents[1] / "slides" / "graphiterx_demo.pptx"
+    out = Path(__file__).resolve().parents[1] / "slides" / "rx_document_processor.pptx"
     out.parent.mkdir(parents=True, exist_ok=True)
     prs.save(str(out))
     print(f"wrote {out}")

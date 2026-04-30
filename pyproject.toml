@@ -1,5 +1,5 @@
 [project]
-name = "graphiterx-demo"
+name = "langchain-anthropic-rx-document-processor"
 version = "0.1.0"
 description = "Universal order & document intake for healthcare commerce — PDF, CSV, SMS in; canonical PurchaseOrder out."
 requires-python = ">=3.13"

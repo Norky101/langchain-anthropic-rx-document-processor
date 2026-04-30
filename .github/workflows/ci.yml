@@ -37,4 +37,4 @@ jobs:
       - name: Confirm slide deck builds
         run: |
           uv run python scripts/make_slides.py
-          test -s slides/graphiterx_demo.pptx
+          test -s slides/rx_document_processor.pptx

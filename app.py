@@ -42,15 +42,15 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
-logger = logging.getLogger("graphiterx.ui")
+logger = logging.getLogger("rx_doc_processor.ui")
 
 st.set_page_config(
-    page_title="graphiteRx — Order Intake Pipeline",
+    page_title="Rx Document Processor — LangChain · Anthropic",
     page_icon="📦",
     layout="wide",
 )
 
-# Brand palette sampled from graphiterx.com
+# Brand palette — navy / teal / tint / slate
 NAVY = "#18193F"
 TEAL = "#00A8B3"
 TINT = "#D2E5E5"
@@ -226,8 +226,8 @@ st.markdown(
     <div class="brand-banner">
       <div>
         <h1>
-          <span class="brand-pill">graphiteRx</span>
-          Order &amp; Document Intake Pipeline
+          <span class="brand-pill">RX DOC PROCESSOR</span>
+          LangChain · Anthropic Claude · Pydantic
         </h1>
         <p>PDF · CSV · SMS &nbsp;→&nbsp; canonical PurchaseOrder &nbsp;·&nbsp;
            DEA / account / PHI scrubbed &nbsp;·&nbsp; append-only audit log</p>
@@ -300,7 +300,7 @@ the same call that produces the data. Routing is threshold-based:
 `flagged_fields` lists the specific paths a reviewer should verify.
 Thresholds are configurable via `DEMO_AUTO_THRESHOLD` and
 `DEMO_LOW_THRESHOLD` env vars. See
-[DEMO.md §4](https://github.com/Norky101/graphiteRxDemo/blob/main/DEMO.md#4-confidence-scoring)
+[DEMO.md §4](https://github.com/Norky101/langchain-anthropic-rx-document-processor/blob/main/DEMO.md#4-confidence-scoring)
 for the full mechanism and production extensions.
 """,
         unsafe_allow_html=True,

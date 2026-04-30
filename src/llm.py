@@ -28,7 +28,7 @@ from .schema import PurchaseOrder
 
 load_dotenv()
 
-logger = logging.getLogger("graphiterx.llm")
+logger = logging.getLogger("rx_doc_processor.llm")
 
 
 _TRANSIENT_ERRORS: tuple[type[Exception], ...] = (

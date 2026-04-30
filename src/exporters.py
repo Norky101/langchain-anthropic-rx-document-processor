@@ -37,7 +37,7 @@ from reportlab.platypus import (
 from .schema import PurchaseOrder
 
 
-# Brand palette (sampled from graphiterx.com)
+# Brand palette — navy / teal / tint / slate
 NAVY = colors.HexColor("#18193F")
 TEAL = colors.HexColor("#00A8B3")
 TINT = colors.HexColor("#D2E5E5")
@@ -59,8 +59,8 @@ def order_to_confirmation_pdf(order: PurchaseOrder) -> bytes:
     """Generate a buyer-facing 'Order Received' acknowledgement PDF.
 
     The artifact an ops team would attach to a confirmation email after the
-    pipeline accepts an inbound order. Brand-aligned to graphiteRx (navy +
-    teal + soft tint), single page for typical line-item counts.
+    pipeline accepts an inbound order. Single page for typical line-item
+    counts; navy + teal + soft-tint brand palette.
     """
     buf = io.BytesIO()
     doc = SimpleDocTemplate(

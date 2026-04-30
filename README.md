@@ -1,10 +1,10 @@
-# graphiteRxDemo
+# langchain-anthropic-rx-document-processor
 
-[![CI](https://github.com/Norky101/graphiteRxDemo/actions/workflows/ci.yml/badge.svg)](https://github.com/Norky101/graphiteRxDemo/actions/workflows/ci.yml)
+[![CI](https://github.com/Norky101/langchain-anthropic-rx-document-processor/actions/workflows/ci.yml/badge.svg)](https://github.com/Norky101/langchain-anthropic-rx-document-processor/actions/workflows/ci.yml)
 
-🔗 **Live demo:** [graphiterx-order-intake.streamlit.app](https://graphiterx-order-intake.streamlit.app/) — drop a sample, see the pipeline run end-to-end.
+🔗 **Live demo:** [langchain-anthropic-rx-document-processor.streamlit.app](https://langchain-anthropic-rx-document-processor.streamlit.app/) — drop a sample, see the pipeline run end-to-end.
 
-A LangChain-powered ingestion pipeline that normalizes heterogeneous buyer-side documents (faxed PDF purchase orders, emailed CSV reorder lists, SMS reorder messages) into a single canonical `PurchaseOrder` record, with deterministic redaction of sensitive identifiers and an append-only audit trail.
+A LangChain + Anthropic Claude pipeline that normalizes heterogeneous buyer-side pharma documents (faxed PDF purchase orders, emailed CSV reorder lists, SMS reorder messages) into a single Pydantic-validated `PurchaseOrder` record, with deterministic PHI / DEA / account redaction and an append-only audit trail.
 
 📖 **[`DEMO.md`](DEMO.md)** — full walkthrough: architecture, real input/output examples, confidence-scoring mechanism, production extensions.
 
@@ -191,7 +191,7 @@ A pharma deployment would replace SQLite with RDS (Postgres or Aurora) inside a 
 ## Repository layout
 
 ```
-graphiteRxDemo/
+langchain-anthropic-rx-document-processor/
 ├── DEMO.md                            # full walkthrough document
 ├── README.md                          # this file
 ├── pyproject.toml                     # uv project + pytest + coverage config
@@ -200,8 +200,8 @@ graphiteRxDemo/
 ├── samples/                           # PDF / CSV / SMS sample inputs
 ├── scripts/
 │   ├── make_pdf.py                    # regenerates the sample PDF
-│   └── make_slides.py                 # generates slides/graphiterx_demo.pptx
-├── slides/graphiterx_demo.pptx        # generated 5-slide deck
+│   └── make_slides.py                 # generates slides/rx_document_processor.pptx
+├── slides/rx_document_processor.pptx  # generated 5-slide deck
 ├── src/
 │   ├── schema.py                      # PurchaseOrder + LineItem Pydantic models
 │   ├── detector.py                    # format routing

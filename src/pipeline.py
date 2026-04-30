@@ -20,7 +20,7 @@ from .detector import Format, detect_format
 from .schema import PurchaseOrder
 from .scrubber import ScrubResult, scrub
 
-logger = logging.getLogger("graphiterx.pipeline")
+logger = logging.getLogger("rx_doc_processor.pipeline")
 
 
 _EXTRACTORS = {
